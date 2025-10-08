@@ -19,13 +19,17 @@
 
 #define BACKLOG 5
 
+int client_sock;
+
 // Client info
 class Client {
 public:
     int sock;
     std::string name;
+    int port;
 
-    Client(int socket) : sock(socket) {}
+
+    Client(int socket, int portNumber) : sock(socket), port(portNumber) {}
     ~Client() {}
 };
 
@@ -79,7 +83,7 @@ void closeClient(int clientSocket, std::vector<struct pollfd> &pollfds) {
 }
 
 // Handle client commands
-void clientCommand(int clientSocket, char *buffer) {
+void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &pollfds) {
     std::vector<std::string> tokens;
     std::stringstream stream(buffer);
     std::string token;
@@ -88,24 +92,65 @@ void clientCommand(int clientSocket, char *buffer) {
 
     if(tokens.empty()) return;
 
-    if(tokens[0] == "CONNECT" && tokens.size() == 2) {
-        clients[clientSocket]->name = tokens[1];
-    } else if(tokens[0] == "LEAVE") {
-        closeClient(clientSocket, *(new std::vector<struct pollfd>()));
-    } else if(tokens[0] == "WHO") {
-        std::string msg;
-        for(auto const& pair : clients) {
-            msg += pair.second->name + ",";
+    if(tokens[0] == "CONNECT" && tokens.size() == 3 && clientSocket == client_sock) {
+        std::string ip = tokens[1];
+        int port = std::stoi(tokens[2]);
+
+        int outSock = socket(AF_INET, SOCK_STREAM, 0);
+        if(outSock < 0) {
+            perror("Failed to create outgoing socket");
+            return;
         }
-        if(!msg.empty()) msg.pop_back();
-        send(clientSocket, msg.c_str(), msg.length(), 0);
-    } else if(tokens[0] == "MSG" && tokens[1] == "ALL") {
+
+        setNonBlocking(outSock);
+
+        struct sockaddr_in serverAddr;
+        memset(&serverAddr, 0, sizeof(serverAddr));
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_port = htons(port);
+
+        if(inet_pton(AF_INET, ip.c_str(), &serverAddr.sin_addr) <= 0) {
+            std::cerr << "Invalid IP address: " << ip << std::endl;
+            close(outSock);
+            return;
+        }
+
+        if(connect(outSock, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
+            if(errno != EINPROGRESS) {
+                perror("Connect failed");
+                close(outSock);
+                return;
+            }
+        }
+
+        struct pollfd pfd;
+        pfd.fd = outSock;
+        pfd.events = POLLIN;
+        pollfds.push_back(pfd);
+
+        // Add to clients map
+        clients[outSock] = new Client(outSock, port);
+
+        std::cout << "Connected to remote server at " << ip << ":" << port 
+                  << " (sock fd: " << outSock << ")" << std::endl;
+
+    } else if(tokens[0] == "Group14isthebest") {
+        client_sock = clientSocket;
+    } else if(tokens[0] == "SENDMSG") {
+        if(tokens.size() < 3) return;
+
+        std::string groupID = tokens[1];
         std::string msg;
         for(auto i = tokens.begin()+2; i != tokens.end(); i++)
             msg += *i + " ";
 
-        for(auto const& pair : clients)
-            send(pair.second->sock, msg.c_str(), msg.length(), 0);
+        for (auto const& pair : clients) {
+            if (pair.second->name == groupID) {
+                send(pair.second->sock, msg.c_str(), msg.length(), 0);
+                break;
+            }
+        }
+
     } else if(tokens[0] == "MSG" && tokens.size() > 2) {
         std::string recipient = tokens[1];
         std::string msg;
@@ -121,6 +166,7 @@ void clientCommand(int clientSocket, char *buffer) {
         std::cout << "Unknown command from client: " << buffer << std::endl;
     }
 }
+
 
 int main(int argc, char* argv[]) {
     if(argc != 2) {
@@ -156,7 +202,7 @@ int main(int argc, char* argv[]) {
         }
 
         for(size_t i = 0; i < pollfds.size(); i++) {
-            if(pollfds[i].revents & POLLIN) {
+            if(pollfds[i].revents & POLLIN) { 
                 if(pollfds[i].fd == listenSock) {
                     // New connection
                     struct sockaddr_in client;
@@ -170,19 +216,21 @@ int main(int argc, char* argv[]) {
                         pfd.events = POLLIN;
                         pollfds.push_back(pfd);
 
-                        clients[clientSock] = new Client(clientSock);
-                        std::cout << "Client connected: " << clientSock << std::endl;
+                        int clientPort = ntohs(client.sin_port);
+                        clients[clientSock] = new Client(clientSock, clientPort);
+
+                        std::cout << "Client connected: " << clientSock 
+                                << " (port " << clientPort << ")" << std::endl;
                     }
                 } else {
-                    // Client message
                     memset(buffer, 0, sizeof(buffer));
                     int r = recv(pollfds[i].fd, buffer, sizeof(buffer), 0);
                     if(r <= 0) {
                         closeClient(pollfds[i].fd, pollfds);
-                        i--; // adjust index after erase
+                        i--; 
                     } else {
                         std::cout << "Received: " << buffer << std::endl;
-                        clientCommand(pollfds[i].fd, buffer);
+                        clientCommand(pollfds[i].fd, buffer, pollfds);
                     }
                 }
             }
