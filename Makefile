@@ -7,7 +7,7 @@ client: client.cpp
 	$(CXX) $(CXXFLAGS) client.cpp -o client
 
 server: server.cpp
-	$(CXX) $(CXXFLAGS) server.cpp -o server
+	$(CXX) $(CXXFLAGS) server.cpp -o tsamgroup14
 
 clean:
 	rm -f client server *.o
