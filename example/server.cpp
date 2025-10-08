@@ -124,7 +124,7 @@ void clientCommand(int clientSocket, char *buffer) {
 
 int main(int argc, char* argv[]) {
     if(argc != 2) {
-        std::cerr << "Usage: chat_server <port>" << std::endl;
+        std::cerr << "Usage: server <port>" << std::endl;
         return 1;
     }
 

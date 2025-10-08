@@ -64,7 +64,7 @@ int main(int argc, char* argv[])
 
    if(argc != 3)
    {
-        printf("Usage: chat_client <ip  port>\n");
+        printf("Usage: client <ip  port>\n");
         printf("Ctrl-C to terminate\n");
         exit(0);
    }
