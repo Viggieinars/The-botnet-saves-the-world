@@ -27,6 +27,27 @@
 #include <thread>
 #include <map>
 
+// Debug function to print message in hex format
+void printHex(const char* data, int length) {
+    printf("Formatted message (%d bytes): ", length);
+    for(int i = 0; i < length; i++) {
+        printf("%02X ", (unsigned char)data[i]);
+    }
+    printf("\n");
+    
+    // Also print breakdown
+    printf("  SOH: %02X\n", (unsigned char)data[0]);
+    uint16_t len;
+    memcpy(&len, &data[1], 2);
+    printf("  Length (network): %04X (host: %d)\n", len, ntohs(len));
+    printf("  STX: %02X\n", (unsigned char)data[3]);
+    printf("  Command: ");
+    for(int i = 4; i < length - 1; i++) {
+        printf("%c", data[i]);
+    }
+    printf("\n  ETX: %02X\n", (unsigned char)data[length-1]);
+}
+
 // Threaded function for handling responss from server
 
 void listenServer(int serverSocket)
@@ -48,7 +69,6 @@ void listenServer(int serverSocket)
        {
           printf("%s\n", buffer);
        }
-       printf("here\n");
     }
 }
 

@@ -82,6 +82,56 @@ void closeClient(int clientSocket, std::vector<struct pollfd> &pollfds) {
         pollfds.end());
 }
 
+// Parse formatted message and extract payload
+// Format: <SOH><length><STX><payload><ETX>
+// Returns true if valid, false otherwise
+bool parseMessage(const char* buffer, int bufferLen, std::string &payload) {
+    if (bufferLen < 5) {
+        std::cerr << "Message too short: " << bufferLen << " bytes" << std::endl;
+        return false;
+    }
+
+    // Check SOH (Start of Header)
+    if ((unsigned char)buffer[0] != 0x01) {
+        std::cerr << "Invalid SOH: " << std::hex << (int)(unsigned char)buffer[0] << std::dec << std::endl;
+        return false;
+    }
+
+    // Extract length (2 bytes in network byte order)
+    uint16_t total_length;
+    memcpy(&total_length, &buffer[1], 2);
+    total_length = ntohs(total_length);
+
+    // Verify we received the complete message
+    if (bufferLen < total_length) {
+        std::cerr << "Incomplete message: expected " << total_length 
+                  << " bytes, got " << bufferLen << std::endl;
+        return false;
+    }
+
+    // Check STX (Start of Text)
+    if ((unsigned char)buffer[3] != 0x02) {
+        std::cerr << "Invalid STX: " << std::hex << (int)(unsigned char)buffer[3] << std::dec << std::endl;
+        return false;
+    }
+
+    // Check ETX (End of Text)
+    if ((unsigned char)buffer[total_length - 1] != 0x03) {
+        std::cerr << "Invalid ETX: " << std::hex << (int)(unsigned char)buffer[total_length - 1] << std::dec << std::endl;
+        return false;
+    }
+
+    // Extract payload (between STX and ETX)
+    int payload_length = total_length - 5; // total - (SOH + length + STX + ETX)
+    if (payload_length > 0) {
+        payload.assign(&buffer[4], payload_length);
+    } else {
+        payload.clear();
+    }
+
+    return true;
+}
+
 // Handle client commands
 void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &pollfds) {
     std::vector<std::string> tokens;
@@ -229,8 +279,19 @@ int main(int argc, char* argv[]) {
                         closeClient(pollfds[i].fd, pollfds);
                         i--; 
                     } else {
-                        std::cout << "Received: " << buffer << std::endl;
-                        clientCommand(pollfds[i].fd, buffer, pollfds);
+                        // Parse the formatted message
+                        std::string payload;
+                        if (parseMessage(buffer, r, payload)) {
+                            std::cout << "Received command: " << payload << std::endl;
+                            // Convert payload to char* for clientCommand
+                            char cmd_buffer[1025];
+                            strncpy(cmd_buffer, payload.c_str(), sizeof(cmd_buffer) - 1);
+                            cmd_buffer[sizeof(cmd_buffer) - 1] = '\0';
+                            clientCommand(pollfds[i].fd, cmd_buffer, pollfds);
+                        } else {
+                            std::cerr << "Failed to parse message from client " 
+                                      << pollfds[i].fd << std::endl;
+                        }
                     }
                 }
             }
