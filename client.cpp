@@ -126,7 +126,31 @@ int main(int argc, char* argv[])
 
        fgets(buffer, sizeof(buffer), stdin);
 
-       nwrite = send(serverSocket, buffer, strlen(buffer),0);
+       //format the message to this format <SOH><length><STX><command><ETX>
+       std::string command(buffer);
+       command = command.substr(0, command.find('\n')); // remove the newline
+
+       uint16_t total_length = 5 + command.length(); // SOH + length + STX + command + ETX
+       uint16_t network_length = htons(total_length); // Convert to network byte order
+
+       // Format the message
+       char formatted_message[1024];
+       int pos = 0;
+
+       formatted_message[pos++] = 0x01; // <SOH> 1byte
+       memcpy(&formatted_message[pos], &network_length, 2); // Copies exactly 2 bytes from network length and puts it at position 1 of the formatted message
+
+       pos += 2; // Keeping track of where we are in pos after adding 2 bytes (length)
+
+       formatted_message[pos++] = 0x02; // <STX> 1 byte
+       memcpy(&formatted_message[pos], command.c_str(), command.length()); // Copies exactly the command length and puts it into position 4 of the formatted message
+
+       pos += command.length(); // Keeping track of where we are in pos after adding the command
+       
+       formatted_message[pos++] = 0x03; // <ETX> 1 byte
+
+       // Send the formatted message
+       nwrite = send(serverSocket, formatted_message, pos, 0);
 
        if(nwrite  == -1)
        {
