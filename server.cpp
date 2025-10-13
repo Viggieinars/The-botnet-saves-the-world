@@ -19,7 +19,7 @@
 
 #define BACKLOG 5
 
-int client_sock;
+int client_sock = -1;  // Initialize to invalid socket
 
 // Client info
 class Client {
@@ -291,11 +291,9 @@ int main(int argc, char* argv[]) {
                             char cmd_buffer[1025];
                             strncpy(cmd_buffer, payload.c_str(), sizeof(cmd_buffer) - 1);
                             cmd_buffer[sizeof(cmd_buffer) - 1] = '\0';
-                            if (pollfds[i].fd == client_sock) {
-                                clientCommand(pollfds[i].fd, cmd_buffer, pollfds);
-                            } else {
-                                // SERVER COMMAND
-                            }
+                            
+                            // clientCommand already checks if socket == client_sock for CONNECT
+                            clientCommand(pollfds[i].fd, cmd_buffer, pollfds);
                         } else {
                             std::cerr << "Failed to parse message from client " 
                                       << pollfds[i].fd << std::endl;
