@@ -190,7 +190,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
     } else if(tokens[0] == "Group14isthebest") {
         client_sock = clientSocket;
-    } else if(tokens[0] == "SENDMSG") {
+    } else if(tokens[0] == "SENDMSG" && clientSocket == client_sock) {
         if(tokens.size() < 3) return;
 
         std::string groupID = tokens[1];
@@ -216,6 +216,8 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                 send(pair.second->sock, msg.c_str(), msg.length(), 0);
             }
         }
+    } else if (tokens[0] == "HELO") {
+        std::cout << "Recognized HELO command" << std::endl;
     } else {
         std::cout << "Unknown command from client: " << buffer << std::endl;
     }
