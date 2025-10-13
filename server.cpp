@@ -216,8 +216,13 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                 send(pair.second->sock, msg.c_str(), msg.length(), 0);
             }
         }
-    } else if (tokens[0] == "HELO") {
-        std::cout << "Recognized HELO command" << std::endl;
+    } else if (tokens[0].find("HELO,") == 0) {
+        // Split by comma: HELO,<FROM_GROUP_ID>
+        size_t commaPos = tokens[0].find(',');
+        std::string command = tokens[0].substr(0, commaPos);  // "HELO"
+        std::string groupID = tokens[0].substr(commaPos + 1); // "<FROM_GROUP_ID>"
+        
+        std::cout << "Recognized HELO command from: " << groupID << std::endl;
     } else {
         std::cout << "Unknown command from client: " << buffer << std::endl;
     }
