@@ -27,6 +27,7 @@ public:
     int sock;
     std::string name;
     int port;
+    std:: string ip;
 
 
     Client(int socket, int portNumber) : sock(socket), port(portNumber) {}
@@ -136,6 +137,34 @@ bool parseMessage(const char* buffer, int bufferLen, std::string &payload) {
     return true;
 }
 
+std::string generateSERVERSResponse(int senderSock) {
+    std::ostringstream response;
+    response << "SERVERS,";
+
+    // sender first
+    if (clients.find(senderSock) != clients.end()) {
+        Client* sender = clients[senderSock];
+        if (!sender->name.empty() && !sender->ip.empty()) {
+            response << sender->name << "," << sender->ip << "," << sender->port << ";";
+        }
+    }
+
+    // directly connected 1-hop servers
+    for (const auto& pair : clients) {
+        int sock = pair.first;
+        Client* c = pair.second;
+
+        // skip the sender
+        if (sock == senderSock) continue;
+
+        if (!c->name.empty() && !c->ip.empty()) {
+            response << c->name << "," << c->ip << "," << c->port << ";";
+        }
+    }
+
+    return response.str();
+}
+
 // Handle client commands
 void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &pollfds) {
     std::vector<std::string> tokens;
@@ -217,17 +246,48 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             }
         }
     } else if (tokens[0].find("HELO,") == 0) {
-        // Split by comma: HELO,<FROM_GROUP_ID>
-        size_t commaPos = tokens[0].find(',');
-        std::string command = tokens[0].substr(0, commaPos);  // "HELO"
-        std::string groupID = tokens[0].substr(commaPos + 1); // "<FROM_GROUP_ID>"
-        
-        std::cout << "Recognized HELO command from: " << groupID << std::endl;
+        std::string groupID = tokens[0].substr(5); // remove "HELO,"
+
+        if (clients.find(clientSocket) != clients.end()) {
+            Client* sender = clients[clientSocket];
+            sender->name = groupID;
+
+            std::ostringstream response;
+            response << "SERVERS,";
+
+            // FIRST: the sender (required by assignment)
+            if (!sender->name.empty() && !sender->ip.empty()) {
+                response << sender->name << "," << sender->ip << "," << sender->port << ";";
+            }
+
+            // THEN: other 1-hop servers we know (excluding sender)
+            for (const auto& pair : clients) {
+                Client* c = pair.second;
+                if (pair.first == clientSocket) continue;
+                if (!c->name.empty() && !c->ip.empty()) {
+                    response << c->name << "," << c->ip << "," << c->port << ";";
+                }
+            }
+
+            std::string payload = response.str();
+
+            // Wrap in protocol format
+            uint16_t len = payload.length() + 5;
+            char sendbuf[1024];
+            sendbuf[0] = 0x01;
+            uint16_t len_n = htons(len);
+            memcpy(&sendbuf[1], &len_n, 2);
+            sendbuf[3] = 0x02;
+            memcpy(&sendbuf[4], payload.c_str(), payload.length());
+            sendbuf[4 + payload.length()] = 0x03;
+
+            send(clientSocket, sendbuf, len, 0);
+            std::cout << "Received HELO from " << groupID << ", sent SERVERS: " << payload << std::endl;
+        }
     } else {
         std::cout << "Unknown command from client: " << buffer << std::endl;
     }
 }
-
 
 int main(int argc, char* argv[]) {
     if(argc != 2) {
@@ -279,6 +339,10 @@ int main(int argc, char* argv[]) {
 
                         int clientPort = ntohs(client.sin_port);
                         clients[clientSock] = new Client(clientSock, clientPort);
+                        char ipStr[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &(client.sin_addr), ipStr, INET_ADDRSTRLEN);
+                        clients[clientSock]->ip = std::string(ipStr);
+
 
                         std::cout << "Client connected: " << clientSock 
                                 << " (port " << clientPort << ")" << std::endl;
