@@ -291,7 +291,11 @@ int main(int argc, char* argv[]) {
                             char cmd_buffer[1025];
                             strncpy(cmd_buffer, payload.c_str(), sizeof(cmd_buffer) - 1);
                             cmd_buffer[sizeof(cmd_buffer) - 1] = '\0';
-                            clientCommand(pollfds[i].fd, cmd_buffer, pollfds);
+                            if (pollfds[i].fd == client_sock) {
+                                clientCommand(pollfds[i].fd, cmd_buffer, pollfds);
+                            } else {
+                                // SERVER COMMAND
+                            }
                         } else {
                             std::cerr << "Failed to parse message from client " 
                                       << pollfds[i].fd << std::endl;
