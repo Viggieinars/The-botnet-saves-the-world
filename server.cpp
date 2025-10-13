@@ -87,12 +87,14 @@ void closeClient(int clientSocket, std::vector<struct pollfd> &pollfds) {
 // Returns true if valid, false otherwise
 bool parseMessage(const char* buffer, int bufferLen, std::string &payload) {
     if (bufferLen < 5) {
+        //TODO: LAGA ÞENNAN OGEÐ STRENG
         std::cerr << "Message too short: " << bufferLen << " bytes" << std::endl;
         return false;
     }
 
     // Check SOH (Start of Header)
     if ((unsigned char)buffer[0] != 0x01) {
+        //TODO: LAGA ÞENNAN OGEÐ STRENG
         std::cerr << "Invalid SOH: " << std::hex << (int)(unsigned char)buffer[0] << std::dec << std::endl;
         return false;
     }
@@ -111,12 +113,14 @@ bool parseMessage(const char* buffer, int bufferLen, std::string &payload) {
 
     // Check STX (Start of Text)
     if ((unsigned char)buffer[3] != 0x02) {
+        //TODO: LAGA ÞENNAN OGEÐ STRENG
         std::cerr << "Invalid STX: " << std::hex << (int)(unsigned char)buffer[3] << std::dec << std::endl;
         return false;
     }
 
     // Check ETX (End of Text)
     if ((unsigned char)buffer[total_length - 1] != 0x03) {
+        //TODO: LAGA ÞENNAN OGEÐ STRENG
         std::cerr << "Invalid ETX: " << std::hex << (int)(unsigned char)buffer[total_length - 1] << std::dec << std::endl;
         return false;
     }
