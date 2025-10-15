@@ -16,6 +16,7 @@
 #include <map>
 #include <list>
 #include <algorithm>
+#include <time.h>
 
 #define BACKLOG 5
 
@@ -34,6 +35,70 @@ public:
     Client(int socket, int portNumber) : sock(socket), port(portNumber) {}
     ~Client() {}
 };
+
+//recieve message 
+//keep alive
+//get message
+
+// ---------------------------------------------------------------------------
+// KEEPALIVE implementation notes
+// We periodically send a framed payload to each directly connected peer:
+//   KEEPALIVE,<No. of Messages>
+// where <No. of Messages> is the number of messages we currently hold that are
+// destined for that peer. We must not send more than once per minute.
+// ---------------------------------------------------------------------------
+
+// Track the last time we SENT a KEEPALIVE to each socket (rate limiting)
+static std::map<int, time_t> lastKeepaliveSentAt;
+
+// Track the last time we RECEIVED a KEEPALIVE from each socket (for observability)
+static std::map<int, time_t> lastKeepaliveReceivedAt;
+
+// Placeholder hook to obtain the number of pending messages for a specific peer.
+// NOTE: Your teammate implementing GETMSGS/SENDMSGS should replace this with
+// a real lookup against the pending message store keyed by the peer's group id.
+static unsigned int getPendingCountForPeer(const Client* peer)
+{
+    // TODO: replace with actual count of messages waiting for 'peer->name'
+    // Example once implemented: return pendingMessagesByGroup[peer->name].size();
+    return 0;
+}
+
+// Send a single KEEPALIVE to 'peerSock' if at least 60s have elapsed since last send.
+static void maybeSendKeepalive(int peerSock)
+{
+    time_t now = time(nullptr);
+
+    // Enforce: do not send more than once per minute per peer
+    auto it = lastKeepaliveSentAt.find(peerSock);
+    if (it != lastKeepaliveSentAt.end())
+    {
+        if (difftime(now, it->second) < 60.0)
+        {
+            return; // Too soon to send another KEEPALIVE
+        }
+    }
+
+    // Find 'peerSock' in our clients map to compute the pending count for that peer
+    auto cIt = clients.find(peerSock);
+    if (cIt == clients.end() || cIt->second == nullptr)
+    {
+        return; // Unknown or already closed
+    }
+
+    const Client* peer = cIt->second;
+    unsigned int pendingCount = getPendingCountForPeer(peer);
+
+    // Compose the payload in the required format: KEEPALIVE,<No. of Messages>
+    std::ostringstream payload;
+    payload << "KEEPALIVE," << pendingCount;
+
+    // Send framed using our helper
+    sendFormattedMessage(peerSock, payload.str());
+
+    // Record the send time for rate limiting
+    lastKeepaliveSentAt[peerSock] = now;
+}
 
 std::map<int, Client*> clients;
 
@@ -244,6 +309,24 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
     } else if(tokens[0] == "GETMSG") {
         // TODO
+    } else if (tokens[0].rfind("KEEPALIVE,", 0) == 0) {
+        // Received a KEEPALIVE with a count, e.g. KEEPALIVE,5
+        // Update our receive timestamp, parse and log the reported count.
+        lastKeepaliveReceivedAt[clientSocket] = time(nullptr);
+
+        // Extract the number after the comma
+        unsigned int reported = 0;
+        try {
+            // tokens[0] is like "KEEPALIVE,123"; find comma and parse the rest
+            size_t comma = tokens[0].find(',');
+            if (comma != std::string::npos && comma + 1 < tokens[0].size()) {
+                reported = static_cast<unsigned int>(std::stoul(tokens[0].substr(comma + 1)));
+            }
+        } catch(...) {
+            // Ignore malformed counts silently
+        }
+        std::cout << "KEEPALIVE received from fd " << clientSocket
+                  << ": pending-for-us=" << reported << std::endl;
     } else if (tokens[0].find("HELO,") == 0) {
         // Expected format: HELO,<FROM_GROUP_ID>,<PORT>
         std::vector<std::string> parts;
@@ -326,7 +409,9 @@ int main(int argc, char* argv[]) {
     char buffer[1025];
 
     while(running) {
-        int pollCount = poll(pollfds.data(), pollfds.size(), -1);
+        // Use a finite poll timeout so we wake up periodically to send KEEPALIVEs.
+        // 1000 ms = 1s wake-up cadence (well under the 60s send limit per peer).
+        int pollCount = poll(pollfds.data(), pollfds.size(), 1000);
         if(pollCount < 0) {
             perror("poll failed");
             break;
@@ -385,6 +470,13 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
+        }
+
+        // After handling any IO events (or timeout), iterate peers and send KEEPALIVEs
+        // if at least a minute has passed since the last send to that peer.
+        for (const auto &kv : clients) {
+            int peerSock = kv.first;
+            maybeSendKeepalive(peerSock);
         }
     }
 
