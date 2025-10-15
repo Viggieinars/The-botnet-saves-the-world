@@ -31,6 +31,7 @@ public:
     std::string ip;
     int port;
 
+    // TODO: Hafa bara socket í constructor??
     Client(int socket, std::string ipAddr, int portNumber) : sock(socket), ip(ipAddr), port(portNumber) {}
     ~Client() {}
 };
@@ -413,7 +414,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                 std::cout << "Discovered: " << group << " at " << ip << ":" << partPort << std::endl;
 
                 if (partPort != 1) {
-
+                    // TODO: Reyna að tengjast fleiri serverum sem að eru discovered
                 }
             }
         }
@@ -472,8 +473,6 @@ int main(int argc, char* argv[]) {
                         pfd.events = POLLIN;
                         pollfds.push_back(pfd);
 
-                        char clientIP[INET_ADDRSTRLEN];
-                        inet_ntop(AF_INET, &client.sin_addr, clientIP, INET_ADDRSTRLEN);
                         int clientPort = ntohs(client.sin_port);
                         char ipStr[INET_ADDRSTRLEN];
                         inet_ntop(AF_INET, &(client.sin_addr), ipStr, INET_ADDRSTRLEN);
