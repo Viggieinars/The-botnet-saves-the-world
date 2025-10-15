@@ -20,6 +20,7 @@
 #define BACKLOG 5
 
 int client_sock = -1;  // Initialize to invalid socket
+std::string myGroupID = "A5_14";
 
 // Client info
 class Client {
@@ -28,6 +29,7 @@ public:
     std::string name;
     std::string ip;
     int port;
+    std::string ip;
 
 
     Client(int socket, std::string ipAddr, int portNumber) : sock(socket), ip(ipAddr), port(portNumber) {}
@@ -41,6 +43,42 @@ void setNonBlocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 }
+
+void sendFormattedMessage(int sock, const std::string& msg) {
+    uint16_t len = msg.length() + 5;
+    char sendbuf[1024];
+    sendbuf[0] = 0x01;
+    uint16_t len_n = htons(len);
+    memcpy(&sendbuf[1], &len_n, 2);
+    sendbuf[3] = 0x02;
+    memcpy(&sendbuf[4], msg.c_str(), msg.length());
+    sendbuf[4 + msg.length()] = 0x03;
+    send(sock, sendbuf, len, 0);
+}
+
+std::string getLocalIPAddress() {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return "127.0.0.1";
+
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = inet_addr("8.8.8.8");
+    dest.sin_port = htons(80);
+
+    connect(sock, (struct sockaddr*)&dest, sizeof(dest));
+
+    struct sockaddr_in name;
+    socklen_t namelen = sizeof(name);
+    getsockname(sock, (struct sockaddr*)&name, &namelen);
+
+    char buffer[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &name.sin_addr, buffer, sizeof(buffer));
+
+    close(sock);
+    return std::string(buffer);
+}
+
 
 // Open server socket
 int open_socket(int portno) {
@@ -107,15 +145,13 @@ std::string createMessage(const std::string &payload) {
 // Returns true if valid, false otherwise
 bool parseMessage(const char* buffer, int bufferLen, std::string &payload) {
     if (bufferLen < 5) {
-        //TODO: LAGA ÞENNAN OGEÐ STRENG
-        std::cerr << "Message too short: " << bufferLen << " bytes" << std::endl;
+        std::cerr << "Message too short" << std::endl;
         return false;
     }
 
     // Check SOH (Start of Header)
     if ((unsigned char)buffer[0] != 0x01) {
-        //TODO: LAGA ÞENNAN OGEÐ STRENG
-        std::cerr << "Invalid SOH: " << std::hex << (int)(unsigned char)buffer[0] << std::dec << std::endl;
+        std::cerr << "Invalid SOH" << std::endl;
         return false;
     }
 
@@ -133,15 +169,13 @@ bool parseMessage(const char* buffer, int bufferLen, std::string &payload) {
 
     // Check STX (Start of Text)
     if ((unsigned char)buffer[3] != 0x02) {
-        //TODO: LAGA ÞENNAN OGEÐ STRENG
-        std::cerr << "Invalid STX: " << std::hex << (int)(unsigned char)buffer[3] << std::dec << std::endl;
+        std::cerr << "Invalid STX" << std::endl;
         return false;
     }
 
     // Check ETX (End of Text)
     if ((unsigned char)buffer[total_length - 1] != 0x03) {
-        //TODO: LAGA ÞENNAN OGEÐ STRENG
-        std::cerr << "Invalid ETX: " << std::hex << (int)(unsigned char)buffer[total_length - 1] << std::dec << std::endl;
+        std::cerr << "Invalid ETX" << std::endl;
         return false;
     }
 
@@ -157,7 +191,7 @@ bool parseMessage(const char* buffer, int bufferLen, std::string &payload) {
 }
 
 // Handle client commands
-void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &pollfds) {
+void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &pollfds, int port) {
     std::vector<std::string> tokens;
     std::stringstream stream(buffer);
     std::string token;
@@ -203,11 +237,14 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         pollfds.push_back(pfd);
 
         // Add to clients map
-        clients[outSock] = new Client(outSock, ip, port);
+        clients[outSock] = new Client(outSock, port);
+        clients[outSock]->ip = ip;
 
         std::cout << "Connected to remote server at " << ip << ":" << port 
                   << " (sock fd: " << outSock << ")" << std::endl;
 
+        std::string heloMsg = "HELO," + myGroupID + "," + std::to_string(port);
+        sendFormattedMessage(outSock, heloMsg);
     } else if(tokens[0] == "Group14isthebest") {
         client_sock = clientSocket;
     } else if(tokens[0] == "SENDMSG" && clientSocket == client_sock) {
@@ -225,45 +262,57 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             }
         }
 
-    } else if(tokens[0] == "MSG" && tokens.size() > 2) {
-        std::string recipient = tokens[1];
-        std::string msg;
-        for(auto i = tokens.begin()+2; i != tokens.end(); i++)
-            msg += *i + " ";
-
-        for(auto const& pair : clients) {
-            if(pair.second->name == recipient) {
-                send(pair.second->sock, msg.c_str(), msg.length(), 0);
-            }
-        }
+    } else if(tokens[0] == "GETMSG") {
+        // TODO
     } else if (tokens[0].find("HELO,") == 0) {
-        // Split by comma: HELO,<FROM_GROUP_ID>
-        size_t commaPos = tokens[0].find(',');
-        std::string command = tokens[0].substr(0, commaPos);  // "HELO"
-        std::string groupID = tokens[0].substr(commaPos + 1); // "<FROM_GROUP_ID>"
-        
-        std::cout << "Received HELO from: " << groupID << std::endl;
-        
-        // Save the group ID for this client
+        // Expected format: HELO,<FROM_GROUP_ID>,<PORT>
+        std::vector<std::string> parts;
+        std::stringstream ss(tokens[0]);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            parts.push_back(item);
+        }
+
+        int reportedPort = -1;
+
+        std::string groupID = parts[1];
+
+        if (parts.size() == 3) {
+            reportedPort = std::stoi(parts[2]);
+        }
+
         if (clients.find(clientSocket) != clients.end()) {
-            clients[clientSocket]->name = groupID;
-        }
-        
-        // Build SERVERS response with all connected servers
-        std::string response = "SERVERS," + groupID + "," + clients[clientSocket]->ip + "," + std::to_string(clients[clientSocket]->port);
-        
-        // Add all other connected servers (those with a name)
-        for (auto const& pair : clients) {
-            if (pair.first != clientSocket && !pair.second->name.empty()) {
-                response += ";" + pair.second->name + "," + pair.second->ip + "," + std::to_string(pair.second->port);
+            Client* sender = clients[clientSocket];
+            sender->name = groupID;
+
+            if (reportedPort != -1) {
+                sender->port = reportedPort;
             }
+
+            std::cout << "Recognized HELO from: " << groupID 
+                    << " (port: " << reportedPort << ")" << std::endl;
+
+            // Prepare SERVERS response
+            std::string myIP = getLocalIPAddress();
+            int myListenPort = port;
+
+            std::ostringstream response;
+            response << "SERVERS," << myGroupID << "," << myIP << "," << myListenPort << ";";
+
+            for (const auto& pair : clients) {
+                if (pair.first == clientSocket) continue;
+
+                Client* c = pair.second;
+                if (!c->name.empty() && !c->ip.empty()) {
+                    response << c->name << "," << c->ip << "," << c->port << ";";
+                }
+            }
+
+            std::string payload = response.str();
+
+            sendFormattedMessage(clientSocket, payload);
+            std::cout << "Sent SERVERS to " << groupID << ": " << payload << std::endl;
         }
-        
-        // Format and send the message
-        std::string formattedMsg = createMessage(response);
-        send(clientSocket, formattedMsg.c_str(), formattedMsg.length(), 0);
-        
-        std::cout << "Sent SERVERS response: " << response << std::endl;
     } else {
         std::cout << "Unknown command from client: " << buffer << std::endl;
     }
@@ -321,10 +370,18 @@ int main(int argc, char* argv[]) {
                         char clientIP[INET_ADDRSTRLEN];
                         inet_ntop(AF_INET, &client.sin_addr, clientIP, INET_ADDRSTRLEN);
                         int clientPort = ntohs(client.sin_port);
-                        clients[clientSock] = new Client(clientSock, std::string(clientIP), clientPort);
+                        char ipStr[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &(client.sin_addr), ipStr, INET_ADDRSTRLEN);
+                        
+                        clients[clientSock] = new Client(clientSock, clientPort);
+                        clients[clientSock]->ip = std::string(ipStr);
 
                         std::cout << "Client connected: " << clientSock 
-                                << " from " << clientIP << ":" << clientPort << std::endl;
+                                << " (port " << clientPort << ")" << std::endl;
+
+                        std::string heloMsg = "HELO," + myGroupID + "," + std::to_string(port);
+                        sendFormattedMessage(clientSock, heloMsg);
+                        std::cout << "Sent HELO to " << ipStr << ":" << clientPort << std::endl;
                     }
                 } else {
                     memset(buffer, 0, sizeof(buffer));
@@ -342,8 +399,7 @@ int main(int argc, char* argv[]) {
                             strncpy(cmd_buffer, payload.c_str(), sizeof(cmd_buffer) - 1);
                             cmd_buffer[sizeof(cmd_buffer) - 1] = '\0';
                             
-                            // clientCommand already checks if socket == client_sock for CONNECT
-                            clientCommand(pollfds[i].fd, cmd_buffer, pollfds);
+                            clientCommand(pollfds[i].fd, cmd_buffer, pollfds, port);
                         } else {
                             std::cerr << "Failed to parse message from client " 
                                       << pollfds[i].fd << std::endl;
