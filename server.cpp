@@ -384,6 +384,39 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         std::string heloReply = std::string("HELO,") + myGroupID;
         sendFormattedMessage(clientSocket, heloReply);
         std::cout << "Replied HELO: " << heloReply << std::endl;
+    } else if (tokens[0].rfind("SERVERS", 0)) {
+        std::cout << "Processing SERVERS response" << std::endl;
+
+        std::string serverList = tokens[0].substr(8);
+
+        std::stringstream entryStream(serverList);
+        std::string entry;
+        while (std::getline(entryStream, entry, ';')) {
+            if (entry.empty()) continue;
+
+            std::vector<std::string> parts;
+            std::stringstream partStream(entry);
+            std::string part;
+            while (std::getline(partStream, part, ',')) {
+                parts.push_back(part);
+            }
+
+            if (parts.size() == 3) {
+                std::string group = parts[0];
+                std::string ip = parts[1];
+                int partPort = std::stoi(parts[2]);
+
+                if (group == myGroupID) {
+                    continue;
+                }
+
+                std::cout << "Discovered: " << group << " at " << ip << ":" << partPort << std::endl;
+
+                if (partPort != 1) {
+
+                }
+            }
+        }
     } else {
         std::cout << "Unknown command from client: " << buffer << std::endl;
     }
