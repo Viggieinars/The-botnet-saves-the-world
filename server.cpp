@@ -240,7 +240,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         std::cout << "Connected to remote server at " << ip << ":" << port 
                   << " (sock fd: " << outSock << ")" << std::endl;
 
-        std::string heloMsg = "HELO," + myGroupID + "," + std::to_string(port);
+        std::string heloMsg = "HELO," + myGroupID;
         sendFormattedMessage(outSock, heloMsg);
     } else if(tokens[0] == "Group14isthebest") {
         client_sock = clientSocket;
@@ -375,7 +375,7 @@ int main(int argc, char* argv[]) {
                         std::cout << "Client connected: " << clientSock 
                                 << " (port " << clientPort << ")" << std::endl;
 
-                        std::string heloMsg = "HELO," + myGroupID + "," + std::to_string(port);
+                        std::string heloMsg = "HELO," + myGroupID;
                         sendFormattedMessage(clientSock, heloMsg);
                         std::cout << "Sent HELO to " << ipStr << ":" << clientPort << std::endl;
                     }
