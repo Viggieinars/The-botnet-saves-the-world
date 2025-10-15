@@ -265,9 +265,10 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                   << " (sock fd: " << outSock << ")" << std::endl;
     } else if(tokens[0] == "Group14isthebest") {
         client_sock = clientSocket;
-    } else if(tokens[0] == "SENDMSG") {
-        if(clientSocket == client_sock) {
+    } else if(tokens[0].find("SENDMSG") == 0) {
+        if(tokens[0] == "SENDMSG" && clientSocket == client_sock) {
             // SENDMSG from our client - forward to another server
+            // Format: SENDMSG <TO_GROUP_ID> <Message with spaces>
             if(tokens.size() < 3) return;
 
             std::string toGroupID = tokens[1];
@@ -279,6 +280,9 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
             // Format: SENDMSG,<TO GROUP ID>,<FROM GROUP ID>,<Message content>
             std::string formattedMsg = "SENDMSG," + toGroupID + "," + myGroupID + "," + msg;
+            
+            std::cout << "DEBUG: Built message: len=" << msg.length() << " msg=\"" << msg << "\"" << std::endl;
+            std::cout << "DEBUG: Full formatted: \"" << formattedMsg << "\"" << std::endl;
 
             for (auto const& pair : clients) {
                 if (pair.second->name == toGroupID) {
@@ -287,16 +291,24 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                     break;
                 }
             }
-        } else {
+        } else if(tokens[0].find("SENDMSG,") == 0) {
             // SENDMSG from another server - Expected format: SENDMSG,<TO_GROUP_ID>,<FROM_GROUP_ID>,<Message>
-            if(tokens.size() < 4) return;
+            std::vector<std::string> parts;
+            std::stringstream ss(tokens[0]);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                parts.push_back(item);
+            }
             
-            std::string toGroupID = tokens[1];
-            std::string fromGroupID = tokens[2];
-            std::string msg;
-            for(auto i = tokens.begin()+3; i != tokens.end(); i++) {
-                if(i != tokens.begin()+3) msg += " ";
-                msg += *i;
+            if(parts.size() < 4) return;
+            
+            std::string toGroupID = parts[1];
+            std::string fromGroupID = parts[2];
+            std::string msg = parts[3];
+            
+            // Reconstruct message if it had commas
+            for(size_t i = 4; i < parts.size(); i++) {
+                msg += "," + parts[i];
             }
 
             if(toGroupID == myGroupID) {
@@ -330,11 +342,18 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                           << " (remaining: " << messageQueue.size() << ")" << std::endl;
             }
         }
-    } else if(tokens[0] == "GETMSGS") {
+    } else if(tokens[0].find("GETMSGS") == 0) {
         // Server command: GETMSGS,<GROUP_ID> - another server requesting messages for a group
-        if(tokens.size() < 2) return;
+        std::vector<std::string> parts;
+        std::stringstream ss(tokens[0]);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            parts.push_back(item);
+        }
         
-        std::string requestedGroupID = tokens[1];
+        if(parts.size() < 2) return;
+        
+        std::string requestedGroupID = parts[1];
         // TODO: implement sending stored messages to requesting server
         std::cout << "Server requested GETMSGS for " << requestedGroupID << " (not implemented)" << std::endl;
     } else if(tokens[0] == "LISTSERVERS") {
@@ -353,10 +372,8 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             sendFormattedMessage(clientSocket, msg);
             std::cout << "Sent LISTSERVERS response to client" << std::endl;
         }
-    } else if(tokens[0] == "KEEPALIVE") {
+    } else if(tokens[0].find("KEEPALIVE") == 0) {
         // Server command: KEEPALIVE,<No. of Messages>
-        if(tokens.size() < 2) return;
-        // int numMessages = std::stoi(tokens[1]);
         std::cout << "Received KEEPALIVE from " << (clients.find(clientSocket) != clients.end() ? clients[clientSocket]->name : "unknown") << std::endl;
     } else if(tokens[0] == "STATUSREQ") {
         // Server command: STATUSREQ - reply with STATUSRESP
@@ -366,10 +383,10 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         std::string msg = response.str();
         sendFormattedMessage(clientSocket, msg);
         std::cout << "Sent STATUSRESP in response to STATUSREQ" << std::endl;
-    } else if(tokens[0] == "STATUSRESP") {
+    } else if(tokens[0].find("STATUSRESP") == 0) {
         // Server command: STATUSRESP,<server,msgs held>,...
         std::cout << "Received STATUSRESP: " << buffer << std::endl;
-    } else if(tokens[0] == "SERVERS") {
+    } else if(tokens[0].find("SERVERS") == 0) {
         // Server response: SERVERS,<group>,<ip>,<port>;...
         std::cout << "Received SERVERS response: " << buffer << std::endl;
         // TODO: parse and potentially connect to new servers
@@ -422,7 +439,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             sendFormattedMessage(clientSocket, payload);
             std::cout << "Sent SERVERS to " << groupID << ": " << payload << std::endl;
         }
-    } else if(tokens[0] == "ERROR") {
+    } else if(tokens[0].find("ERROR") == 0) {
         // ERROR message from another server - Expected format: ERROR,<FROM>,<TO>,<error message>
         std::cerr << "ERROR received: " << buffer << std::endl;
         // Don't close connection on errors, just log them
