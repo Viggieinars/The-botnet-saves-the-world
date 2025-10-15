@@ -353,7 +353,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
     } else if (tokens[0].rfind("KEEPALIVE,", 0) == 0) {
         // Parse incoming KEEPALIVE,<n> (optional; currently ignored beyond validation)
     } else if (tokens[0].find("HELO,") == 0) {
-        // Expected format: HELO,<FROM_GROUP_ID>,<PORT>
+        // Expected: HELO,<FROM_GROUP_ID>[,<PORT>]; reply with HELO,<MY_GROUP_ID>
         std::vector<std::string> parts;
         std::stringstream ss(tokens[0]);
         std::string item;
@@ -361,46 +361,17 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             parts.push_back(item);
         }
 
-        int reportedPort = -1;
-
-        std::string groupID = parts[1];
-
-        if (parts.size() == 3) {
-            reportedPort = std::stoi(parts[2]);
+        if (parts.size() >= 2) {
+            std::string peerGroup = parts[1];
+            if (clients.find(clientSocket) != clients.end()) {
+                Client* sender = clients[clientSocket];
+                sender->name = peerGroup;
+            }
         }
 
-        if (clients.find(clientSocket) != clients.end()) {
-            Client* sender = clients[clientSocket];
-            sender->name = groupID;
-
-            if (reportedPort != -1) {
-                sender->port = reportedPort;
-            }
-
-            std::cout << "Recognized HELO from: " << groupID 
-                    << " (port: " << reportedPort << ")" << std::endl;
-
-            // Prepare SERVERS response
-            std::string myIP = getLocalIPAddress();
-            int myListenPort = port;
-
-            std::ostringstream response;
-            response << "SERVERS," << myGroupID << "," << myIP << "," << myListenPort << ";";
-
-            for (const auto& pair : clients) {
-                if (pair.first == clientSocket) continue;
-
-                Client* c = pair.second;
-                if (!c->name.empty() && !c->ip.empty()) {
-                    response << c->name << "," << c->ip << "," << c->port << ";";
-                }
-            }
-
-            std::string payload = response.str();
-
-            sendFormattedMessage(clientSocket, payload);
-            std::cout << "Sent SERVERS to " << groupID << ": " << payload << std::endl;
-        }
+        std::string heloReply = std::string("HELO,") + myGroupID;
+        sendFormattedMessage(clientSocket, heloReply);
+        std::cout << "Replied HELO: " << heloReply << std::endl;
     } else {
         std::cout << "Unknown command from client: " << buffer << std::endl;
     }
