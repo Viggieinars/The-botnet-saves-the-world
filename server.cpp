@@ -122,6 +122,10 @@ static void maybeSendKeepalive(int peerSock)
     // Send framed using our helper
     sendFormattedMessage(peerSock, payload.str());
 
+    // Verbose log to make it easy to verify transmissions on the sender side
+    std::cout << "Sent KEEPALIVE to fd " << peerSock
+              << ": pending-for-peer=" << pendingCount << std::endl;
+
     // Record the send time for rate limiting
     lastKeepaliveSentAt[peerSock] = now;
 }
