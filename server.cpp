@@ -267,7 +267,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             return;
         }
 
-        setNonBlocking(outSock);
+        // Use blocking connect for outbound so we only send HELO after a full connection
 
         struct sockaddr_in serverAddr;
         memset(&serverAddr, 0, sizeof(serverAddr));
@@ -290,7 +290,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
         struct pollfd pfd;
         pfd.fd = outSock;
-        pfd.events = POLLIN;
+        pfd.events = POLLIN; // listen for incoming data from the remote server
         pollfds.push_back(pfd);
 
         // Add to clients map
