@@ -29,8 +29,9 @@ public:
     std::string name;
     std::string ip;
     int port;
+    bool heloSent;
 
-    Client(int socket, std::string ipAddr, int portNumber) : sock(socket), ip(ipAddr), port(portNumber) {}
+    Client(int socket, std::string ipAddr, int portNumber) : sock(socket), ip(ipAddr), port(portNumber), heloSent(false) {}
     ~Client() {}
 };
 
@@ -231,17 +232,14 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
         struct pollfd pfd;
         pfd.fd = outSock;
-        pfd.events = POLLIN;
+        pfd.events = POLLIN | POLLOUT;  // Monitor for connection completion
         pollfds.push_back(pfd);
 
         // Add to clients map
         clients[outSock] = new Client(outSock, ip, port);
 
-        std::cout << "Connected to remote server at " << ip << ":" << port 
+        std::cout << "Connecting to remote server at " << ip << ":" << port 
                   << " (sock fd: " << outSock << ")" << std::endl;
-
-        std::string heloMsg = "HELO," + myGroupID;
-        sendFormattedMessage(outSock, heloMsg);
     } else if(tokens[0] == "Group14isthebest") {
         client_sock = clientSocket;
     } else if(tokens[0] == "SENDMSG" && clientSocket == client_sock) {
@@ -350,6 +348,33 @@ int main(int argc, char* argv[]) {
         }
 
         for(size_t i = 0; i < pollfds.size(); i++) {
+            // Handle POLLOUT - outgoing connection established
+            if(pollfds[i].revents & POLLOUT) {
+                int fd = pollfds[i].fd;
+                if(clients.find(fd) != clients.end() && !clients[fd]->heloSent) {
+                    // Check if connection succeeded
+                    int error = 0;
+                    socklen_t len = sizeof(error);
+                    if(getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) == 0 && error == 0) {
+                        // Connection successful, send HELO
+                        std::string heloMsg = "HELO," + myGroupID;
+                        sendFormattedMessage(fd, heloMsg);
+                        clients[fd]->heloSent = true;
+                        std::cout << "Connection established to " << clients[fd]->ip << ":" 
+                                  << clients[fd]->port << ", sent HELO" << std::endl;
+                        
+                        // Remove POLLOUT, keep POLLIN
+                        pollfds[i].events = POLLIN;
+                    } else {
+                        std::cerr << "Connection failed to " << clients[fd]->ip << ":" 
+                                  << clients[fd]->port << std::endl;
+                        closeClient(fd, pollfds);
+                        i--;
+                        continue;
+                    }
+                }
+            }
+            
             if(pollfds[i].revents & POLLIN) { 
                 if(pollfds[i].fd == listenSock) {
                     // New connection
@@ -377,6 +402,7 @@ int main(int argc, char* argv[]) {
 
                         std::string heloMsg = "HELO," + myGroupID;
                         sendFormattedMessage(clientSock, heloMsg);
+                        clients[clientSock]->heloSent = true;
                         std::cout << "Sent HELO to " << ipStr << ":" << clientPort << std::endl;
                     }
                 } else {
