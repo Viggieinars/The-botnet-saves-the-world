@@ -384,7 +384,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         std::string heloReply = std::string("HELO,") + myGroupID;
         sendFormattedMessage(clientSocket, heloReply);
         std::cout << "Replied HELO: " << heloReply << std::endl;
-    } else if (tokens[0].find("SERVERS,") == 0) {
+    } else if (tokens[0].find("SERVERS") == 0) {
         std::cout << "Processing SERVERS response" << std::endl;
 
         std::string serverList = tokens[0].substr(8);
