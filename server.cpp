@@ -17,6 +17,7 @@
 #include <list>
 #include <algorithm>
 #include <time.h>
+#include <set>
 
 #define BACKLOG 5
 
@@ -36,6 +37,10 @@ public:
 };
 
 std::map<int, Client*> clients;
+
+// Pending messages addressed by group id (filled by your SENDMSGS/GETMSGS logic).
+// We use its sizes to answer STATUSREQ and to compute KEEPALIVE counts.
+static std::map<std::string, std::list<std::string>> pendingMessagesByGroup;
 
 // Helper to set non-blocking
 void setNonBlocking(int sock) {
@@ -68,8 +73,11 @@ static std::map<int, time_t> lastKeepaliveSentAt;
 // Replace this with your real pending-queue size lookup once available.
 static unsigned int getPendingCountForPeer(const Client* peer)
 {
-    (void)peer; // not used until message queues are implemented
-    return 0;
+    if (peer == nullptr) return 0;
+    if (peer->name.empty()) return 0;
+    auto it = pendingMessagesByGroup.find(peer->name);
+    if (it == pendingMessagesByGroup.end()) return 0;
+    return static_cast<unsigned int>(it->second.size());
 }
 
 // Possibly send a KEEPALIVE to a peer if we've waited at least 60s
@@ -310,6 +318,35 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
     } else if(tokens[0] == "GETMSG") {
         // TODO
+    } else if(tokens[0] == "STATUSREQ") {
+        // Build: STATUSRESP,<server, msgs held>,...
+        std::ostringstream resp;
+        resp << "STATUSRESP";
+
+        // Track which group ids we've already added to avoid duplicates
+        std::set<std::string> includedGroups;
+
+        // Include all known connected peers first
+        for (const auto &kv : clients) {
+            const Client* c = kv.second;
+            if (!c || c->name.empty()) continue;
+            unsigned int count = getPendingCountForPeer(c);
+            resp << "," << c->name << "," << count;
+            includedGroups.insert(c->name);
+        }
+
+        // Include any groups we have pending messages for, even if not connected
+        for (const auto &pv : pendingMessagesByGroup) {
+            const std::string &group = pv.first;
+            if (group.empty()) continue;
+            if (includedGroups.find(group) != includedGroups.end()) continue;
+            unsigned int count = static_cast<unsigned int>(pv.second.size());
+            resp << "," << group << "," << count;
+        }
+
+        // Send framed response back to the requester
+        sendFormattedMessage(clientSocket, resp.str());
+        std::cout << "Replied STATUSRESP to fd " << clientSocket << ": " << resp.str() << std::endl;
     } else if (tokens[0].rfind("KEEPALIVE,", 0) == 0) {
         // Received a KEEPALIVE report from a peer, e.g. KEEPALIVE,5
         // We parse the number after the comma and just log it for visibility.
