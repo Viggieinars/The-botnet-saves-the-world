@@ -482,7 +482,13 @@ int main(int argc, char* argv[]) {
 
         // After handling any IO events (or on timeout), attempt to send KEEPALIVEs
         for (const auto &kv : clients) {
-            maybeSendKeepalive(kv.first);
+            int peerSock = kv.first;
+            const Client* peer = kv.second;
+            // Only send KEEPALIVE to known 1-hop servers (i.e., those that identified via HELO)
+            // and never to our privileged admin client connection.
+            if (!peer || peer->name.empty()) continue;
+            if (peerSock == client_sock) continue;
+            maybeSendKeepalive(peerSock);
         }
     }
 
