@@ -16,6 +16,7 @@
 #include <map>
 #include <list>
 #include <algorithm>
+#include <time.h>
 
 #define BACKLOG 5
 
@@ -36,6 +37,12 @@ public:
 
 std::map<int, Client*> clients;
 
+// Track last time we sent KEEPALIVE to each peer (once/minute per peer)
+static std::map<int, time_t> lastKeepaliveSentAt;
+
+// Pending messages addressed by destination group id
+static std::map<std::string, std::list<std::string>> pendingMessagesByGroup;
+
 // Helper to set non-blocking
 void setNonBlocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
@@ -52,6 +59,63 @@ void sendFormattedMessage(int sock, const std::string& msg) {
     memcpy(&sendbuf[4], msg.c_str(), msg.length());
     sendbuf[4 + msg.length()] = 0x03;
     send(sock, sendbuf, len, 0);
+}
+
+// Return number of messages queued for a specific peer (by its group id)
+static unsigned int getPendingCountForPeer(const Client* peer)
+{
+    if (peer == nullptr) return 0;
+    if (peer->name.empty()) return 0;
+    auto it = pendingMessagesByGroup.find(peer->name);
+    if (it == pendingMessagesByGroup.end()) return 0;
+    return static_cast<unsigned int>(it->second.size());
+}
+
+// Enqueue a message for a group, or deliver immediately if that group is connected
+static void deliverOrQueueMessage(const std::string &toGroup, const std::string &fromGroup, const std::string &text)
+{
+    // Immediate delivery to connected peer whose group name matches destination
+    for (const auto &kv : clients) {
+        const Client* c = kv.second;
+        if (!c) continue;
+        if (c->name == toGroup) {
+            std::ostringstream payload;
+            // Required format: SENDMSG,<TO GROUP ID>,<FROM GROUP ID>,<Message content>
+            payload << "SENDMSG," << toGroup << "," << fromGroup << "," << text;
+            sendFormattedMessage(kv.first, payload.str());
+            return;
+        }
+    }
+
+    // Not connected: queue for later retrieval by GETMSGS
+    std::ostringstream stored;
+    stored << fromGroup << "," << text; // store as FROM,TEXT under the TO group key
+    pendingMessagesByGroup[toGroup].push_back(stored.str());
+}
+
+// Try to send KEEPALIVE,<No. of Messages> to the given peer if >=60s since last send
+static void maybeSendKeepalive(int peerSock)
+{
+    time_t now = time(nullptr);
+
+    auto it = lastKeepaliveSentAt.find(peerSock);
+    if (it != lastKeepaliveSentAt.end()) {
+        if (difftime(now, it->second) < 60.0) return; // enforce once/minute
+    }
+
+    auto cIt = clients.find(peerSock);
+    if (cIt == clients.end() || cIt->second == nullptr) return;
+
+    const Client* peer = cIt->second;
+    if (peer->name.empty()) return; // only identified 1-hop servers
+    if (peerSock == client_sock) return; // never the admin client
+
+    unsigned int pendingCount = getPendingCountForPeer(peer);
+    std::ostringstream payload;
+    payload << "KEEPALIVE," << pendingCount;
+    sendFormattedMessage(peerSock, payload.str());
+
+    lastKeepaliveSentAt[peerSock] = now;
 }
 
 std::string getLocalIPAddress() {
@@ -260,7 +324,34 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         }
 
     } else if(tokens[0] == "GETMSG") {
-        // TODO
+        // TODO (legacy)
+    } else if(tokens[0] == "SENDMSG" && tokens.size() >= 4) {
+        // SENDMSG,<TO GROUP ID>,<FROM GROUP ID>,<Message content>
+        // This variant may arrive from peers; just forward or queue using our handler
+        std::string toGroup = tokens[1];
+        std::string fromGroup = tokens[2];
+        std::string text;
+        for (size_t i = 3; i < tokens.size(); ++i) {
+            if (i > 3) text += " ";
+            text += tokens[i];
+        }
+        deliverOrQueueMessage(toGroup, fromGroup, text);
+    } else if(tokens[0] == "GETMSGS" && tokens.size() >= 2) {
+        // GETMSGS,<GROUP ID> — return one queued message for that group if any
+        std::string target = tokens[1];
+        auto itp = pendingMessagesByGroup.find(target);
+        if (target.empty() || itp == pendingMessagesByGroup.end() || itp->second.empty()) {
+            sendFormattedMessage(clientSocket, std::string("NO_MSG"));
+        } else {
+            std::string entry = itp->second.front();
+            itp->second.pop_front();
+            // entry is FROM,TEXT; reply as SENDMSG,<TO>,<FROM>,<TEXT>
+            std::ostringstream resp;
+            resp << "SENDMSG," << target << "," << entry;
+            sendFormattedMessage(clientSocket, resp.str());
+        }
+    } else if (tokens[0].rfind("KEEPALIVE,", 0) == 0) {
+        // Parse incoming KEEPALIVE,<n> (optional; currently ignored beyond validation)
     } else if (tokens[0].find("HELO,") == 0) {
         // Expected format: HELO,<FROM_GROUP_ID>,<PORT>
         std::vector<std::string> parts;
@@ -343,7 +434,8 @@ int main(int argc, char* argv[]) {
     char buffer[1025];
 
     while(running) {
-        int pollCount = poll(pollfds.data(), pollfds.size(), -1);
+        // Wake up once per second to drive periodic KEEPALIVE sends
+        int pollCount = poll(pollfds.data(), pollfds.size(), 1000);
         if(pollCount < 0) {
             perror("poll failed");
             break;
@@ -403,6 +495,11 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
+        }
+
+        // Attempt periodic KEEPALIVE to identified peers (rate-limited)
+        for (const auto &kv : clients) {
+            maybeSendKeepalive(kv.first);
         }
     }
 
