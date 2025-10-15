@@ -113,7 +113,12 @@ int open_socket(int portno) {
 void closeClient(int clientSocket, std::vector<struct pollfd> &pollfds) {
     std::cout << "Client closed connection: " << clientSocket << std::endl;
     close(clientSocket);
-    clients.erase(clientSocket);
+    
+    // Free the allocated Client object before erasing
+    if (clients.find(clientSocket) != clients.end()) {
+        delete clients[clientSocket];
+        clients.erase(clientSocket);
+    }
 
     pollfds.erase(std::remove_if(pollfds.begin(), pollfds.end(),
         [clientSocket](struct pollfd &p) { return p.fd == clientSocket; }),
@@ -242,23 +247,95 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                   << " (sock fd: " << outSock << ")" << std::endl;
     } else if(tokens[0] == "Group14isthebest") {
         client_sock = clientSocket;
-    } else if(tokens[0] == "SENDMSG" && clientSocket == client_sock) {
-        if(tokens.size() < 3) return;
+    } else if(tokens[0] == "SENDMSG") {
+        if(clientSocket == client_sock) {
+            // SENDMSG from our client - forward to another server
+            if(tokens.size() < 3) return;
 
-        std::string groupID = tokens[1];
-        std::string msg;
-        for(auto i = tokens.begin()+2; i != tokens.end(); i++)
-            msg += *i + " ";
+            std::string toGroupID = tokens[1];
+            std::string msg;
+            for(auto i = tokens.begin()+2; i != tokens.end(); i++)
+                msg += *i + " ";
 
-        for (auto const& pair : clients) {
-            if (pair.second->name == groupID) {
-                send(pair.second->sock, msg.c_str(), msg.length(), 0);
-                break;
+            // Format: SENDMSG,<TO GROUP ID>,<FROM GROUP ID>,<Message content>
+            std::string formattedMsg = "SENDMSG," + toGroupID + "," + myGroupID + "," + msg;
+
+            for (auto const& pair : clients) {
+                if (pair.second->name == toGroupID) {
+                    sendFormattedMessage(pair.second->sock, formattedMsg);
+                    std::cout << "Sent message to " << toGroupID << ": " << msg << std::endl;
+                    break;
+                }
+            }
+        } else {
+            // SENDMSG from another server - Expected format: SENDMSG,<TO_GROUP_ID>,<FROM_GROUP_ID>,<Message>
+            if(tokens.size() < 4) return;
+            
+            std::string toGroupID = tokens[1];
+            std::string fromGroupID = tokens[2];
+            std::string msg;
+            for(auto i = tokens.begin()+3; i != tokens.end(); i++)
+                msg += *i + " ";
+
+            if(toGroupID == myGroupID) {
+                // Message is for us - store it (TODO: implement message storage)
+                std::cout << "Received message from " << fromGroupID << ": " << msg << std::endl;
+            } else {
+                // Message is for another group - forward it (TODO: implement routing)
+                std::cout << "Received message for " << toGroupID << " from " << fromGroupID 
+                          << " (forwarding not implemented)" << std::endl;
             }
         }
 
     } else if(tokens[0] == "GETMSG") {
-        // TODO
+        // Client command: GETMSG - get a single message for our group
+        if(clientSocket == client_sock) {
+            // TODO: implement message retrieval from storage
+            std::cout << "Client requested GETMSG (not implemented)" << std::endl;
+        }
+    } else if(tokens[0] == "GETMSGS") {
+        // Server command: GETMSGS,<GROUP_ID> - another server requesting messages for a group
+        if(tokens.size() < 2) return;
+        
+        std::string requestedGroupID = tokens[1];
+        // TODO: implement sending stored messages to requesting server
+        std::cout << "Server requested GETMSGS for " << requestedGroupID << " (not implemented)" << std::endl;
+    } else if(tokens[0] == "LISTSERVERS") {
+        // Client command: list servers we're connected to
+        if(clientSocket == client_sock) {
+            std::ostringstream response;
+            response << "Connected servers: ";
+            for (const auto& pair : clients) {
+                if (pair.first == clientSocket) continue;
+                Client* c = pair.second;
+                if (!c->name.empty()) {
+                    response << c->name << " (" << c->ip << ":" << c->port << "), ";
+                }
+            }
+            std::string msg = response.str();
+            sendFormattedMessage(clientSocket, msg);
+            std::cout << "Sent LISTSERVERS response to client" << std::endl;
+        }
+    } else if(tokens[0] == "KEEPALIVE") {
+        // Server command: KEEPALIVE,<No. of Messages>
+        if(tokens.size() < 2) return;
+        // int numMessages = std::stoi(tokens[1]);
+        std::cout << "Received KEEPALIVE from " << (clients.find(clientSocket) != clients.end() ? clients[clientSocket]->name : "unknown") << std::endl;
+    } else if(tokens[0] == "STATUSREQ") {
+        // Server command: STATUSREQ - reply with STATUSRESP
+        std::ostringstream response;
+        response << "STATUSRESP";
+        // TODO: add actual message counts per server
+        std::string msg = response.str();
+        sendFormattedMessage(clientSocket, msg);
+        std::cout << "Sent STATUSRESP in response to STATUSREQ" << std::endl;
+    } else if(tokens[0] == "STATUSRESP") {
+        // Server command: STATUSRESP,<server,msgs held>,...
+        std::cout << "Received STATUSRESP: " << buffer << std::endl;
+    } else if(tokens[0] == "SERVERS") {
+        // Server response: SERVERS,<group>,<ip>,<port>;...
+        std::cout << "Received SERVERS response: " << buffer << std::endl;
+        // TODO: parse and potentially connect to new servers
     } else if (tokens[0].find("HELO,") == 0) {
         // Expected format: HELO,<FROM_GROUP_ID>,<PORT>
         std::vector<std::string> parts;
@@ -408,9 +485,18 @@ int main(int argc, char* argv[]) {
                 } else {
                     memset(buffer, 0, sizeof(buffer));
                     int r = recv(pollfds[i].fd, buffer, sizeof(buffer), 0);
-                    if(r <= 0) {
+                    if(r < 0) {
+                        // Non-blocking socket - check if it's just "no data available"
+                        if(errno != EAGAIN && errno != EWOULDBLOCK) {
+                            // Real error
+                            closeClient(pollfds[i].fd, pollfds);
+                            i--;
+                        }
+                        // else: no data available, continue
+                    } else if(r == 0) {
+                        // Connection closed by peer
                         closeClient(pollfds[i].fd, pollfds);
-                        i--; 
+                        i--;
                     } else {
                         // Parse the formatted message
                         std::string payload;
