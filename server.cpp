@@ -54,11 +54,38 @@ static std::map<int, time_t> lastKeepaliveSentAt;
 // Track the last time we RECEIVED a KEEPALIVE from each socket (for observability)
 static std::map<int, time_t> lastKeepaliveReceivedAt;
 
+// (moved KEEPALIVE helpers below to ensure visibility of symbols they depend on)
+
+std::map<int, Client*> clients;
+
+// Helper to set non-blocking
+void setNonBlocking(int sock) {
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+}
+
+void sendFormattedMessage(int sock, const std::string& msg) {
+    uint16_t len = msg.length() + 5;
+    char sendbuf[1024];
+    sendbuf[0] = 0x01;
+    uint16_t len_n = htons(len);
+    memcpy(&sendbuf[1], &len_n, 2);
+    sendbuf[3] = 0x02;
+    memcpy(&sendbuf[4], msg.c_str(), msg.length());
+    sendbuf[4 + msg.length()] = 0x03;
+    send(sock, sendbuf, len, 0);
+}
+
+// ---------------------------------------------------------------------------
+// KEEPALIVE helpers (placed here so they can use 'clients' and sendFormattedMessage)
+// ---------------------------------------------------------------------------
+
 // Placeholder hook to obtain the number of pending messages for a specific peer.
 // NOTE: Your teammate implementing GETMSGS/SENDMSGS should replace this with
 // a real lookup against the pending message store keyed by the peer's group id.
 static unsigned int getPendingCountForPeer(const Client* peer)
 {
+    (void)peer; // silence unused-parameter until message queue logic is added
     // TODO: replace with actual count of messages waiting for 'peer->name'
     // Example once implemented: return pendingMessagesByGroup[peer->name].size();
     return 0;
@@ -98,26 +125,6 @@ static void maybeSendKeepalive(int peerSock)
 
     // Record the send time for rate limiting
     lastKeepaliveSentAt[peerSock] = now;
-}
-
-std::map<int, Client*> clients;
-
-// Helper to set non-blocking
-void setNonBlocking(int sock) {
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-}
-
-void sendFormattedMessage(int sock, const std::string& msg) {
-    uint16_t len = msg.length() + 5;
-    char sendbuf[1024];
-    sendbuf[0] = 0x01;
-    uint16_t len_n = htons(len);
-    memcpy(&sendbuf[1], &len_n, 2);
-    sendbuf[3] = 0x02;
-    memcpy(&sendbuf[4], msg.c_str(), msg.length());
-    sendbuf[4 + msg.length()] = 0x03;
-    send(sock, sendbuf, len, 0);
 }
 
 std::string getLocalIPAddress() {
