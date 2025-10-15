@@ -28,11 +28,10 @@ class Client {
 public:
     int sock;
     std::string name;
-    int port;
     std::string ip;
+    int port;
 
-
-    Client(int socket, int portNumber) : sock(socket), port(portNumber) {}
+    Client(int socket, std::string ipAddr, int portNumber) : sock(socket), ip(ipAddr), port(portNumber) {}
     ~Client() {}
 };
 
@@ -192,6 +191,25 @@ void closeClient(int clientSocket, std::vector<struct pollfd> &pollfds) {
         pollfds.end());
 }
 
+// Create formatted message
+// Format: <SOH><length><STX><payload><ETX>
+std::string createMessage(const std::string &payload) {
+    std::string msg;
+    uint16_t total_length = 5 + payload.length(); // SOH + length(2) + STX + payload + ETX
+    
+    msg += (char)0x01; // SOH
+    
+    // Add length in network byte order
+    uint16_t net_length = htons(total_length);
+    msg.append((char*)&net_length, 2);
+    
+    msg += (char)0x02; // STX
+    msg += payload;
+    msg += (char)0x03; // ETX
+    
+    return msg;
+}
+
 // Parse formatted message and extract payload
 // Format: <SOH><length><STX><payload><ETX>
 // Returns true if valid, false otherwise
@@ -289,13 +307,12 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         pollfds.push_back(pfd);
 
         // Add to clients map
-        clients[outSock] = new Client(outSock, port);
-        clients[outSock]->ip = ip;
+        clients[outSock] = new Client(outSock, ip, port);
 
         std::cout << "Connected to remote server at " << ip << ":" << port 
                   << " (sock fd: " << outSock << ")" << std::endl;
 
-        std::string heloMsg = "HELO," + myGroupID + "," + std::to_string(port);
+        std::string heloMsg = "HELO," + myGroupID;
         sendFormattedMessage(outSock, heloMsg);
     } else if(tokens[0] == "Group14isthebest") {
         client_sock = clientSocket;
@@ -439,17 +456,18 @@ int main(int argc, char* argv[]) {
                         pfd.events = POLLIN;
                         pollfds.push_back(pfd);
 
+                        char clientIP[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &client.sin_addr, clientIP, INET_ADDRSTRLEN);
                         int clientPort = ntohs(client.sin_port);
                         char ipStr[INET_ADDRSTRLEN];
                         inet_ntop(AF_INET, &(client.sin_addr), ipStr, INET_ADDRSTRLEN);
                         
-                        clients[clientSock] = new Client(clientSock, clientPort);
-                        clients[clientSock]->ip = std::string(ipStr);
+                        clients[clientSock] = new Client(clientSock, std::string(ipStr), clientPort);
 
                         std::cout << "Client connected: " << clientSock 
                                 << " (port " << clientPort << ")" << std::endl;
 
-                        std::string heloMsg = "HELO," + myGroupID + "," + std::to_string(port);
+                        std::string heloMsg = "HELO," + myGroupID;
                         sendFormattedMessage(clientSock, heloMsg);
                         std::cout << "Sent HELO to " << ipStr << ":" << clientPort << std::endl;
                     }
