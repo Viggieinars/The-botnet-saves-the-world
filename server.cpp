@@ -333,7 +333,8 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
         for (auto const& pair : clients) {
             if (pair.second->name == groupID) {
-                send(pair.second->sock, msg.c_str(), msg.length(), 0);
+                // Always use framed protocol when sending to peers
+                sendFormattedMessage(pair.second->sock, msg);
                 break;
             }
         }
