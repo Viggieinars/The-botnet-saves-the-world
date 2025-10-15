@@ -9,6 +9,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <time.h>
 
 #include <iostream>
 #include <sstream>
@@ -36,6 +37,19 @@ public:
 };
 
 std::map<int, Client*> clients;
+
+// Message storage
+struct Message {
+    std::string fromGroupID;
+    std::string toGroupID;
+    std::string content;
+    time_t timestamp;
+    
+    Message(std::string from, std::string to, std::string msg) 
+        : fromGroupID(from), toGroupID(to), content(msg), timestamp(time(nullptr)) {}
+};
+
+std::list<Message> messageQueue;
 
 // Helper to set non-blocking
 void setNonBlocking(int sock) {
@@ -278,8 +292,10 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                 msg += *i + " ";
 
             if(toGroupID == myGroupID) {
-                // Message is for us - store it (TODO: implement message storage)
-                std::cout << "Received message from " << fromGroupID << ": " << msg << std::endl;
+                // Message is for us - store it
+                messageQueue.push_back(Message(fromGroupID, toGroupID, msg));
+                std::cout << "Received and stored message from " << fromGroupID << ": " << msg 
+                          << " (total messages: " << messageQueue.size() << ")" << std::endl;
             } else {
                 // Message is for another group - forward it (TODO: implement routing)
                 std::cout << "Received message for " << toGroupID << " from " << fromGroupID 
@@ -290,8 +306,21 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
     } else if(tokens[0] == "GETMSG") {
         // Client command: GETMSG - get a single message for our group
         if(clientSocket == client_sock) {
-            // TODO: implement message retrieval from storage
-            std::cout << "Client requested GETMSG (not implemented)" << std::endl;
+            if(messageQueue.empty()) {
+                std::string response = "No messages available";
+                sendFormattedMessage(clientSocket, response);
+                std::cout << "Client requested GETMSG: no messages" << std::endl;
+            } else {
+                // Get the first message
+                Message msg = messageQueue.front();
+                messageQueue.pop_front();
+                
+                std::ostringstream response;
+                response << "FROM:" << msg.fromGroupID << " MSG:" << msg.content;
+                sendFormattedMessage(clientSocket, response.str());
+                std::cout << "Client retrieved message from " << msg.fromGroupID 
+                          << " (remaining: " << messageQueue.size() << ")" << std::endl;
+            }
         }
     } else if(tokens[0] == "GETMSGS") {
         // Server command: GETMSGS,<GROUP_ID> - another server requesting messages for a group
