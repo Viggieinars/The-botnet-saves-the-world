@@ -242,6 +242,10 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
         std::string heloMsg = "HELO," + myGroupID;
         sendFormattedMessage(outSock, heloMsg);
+    } else if (tokens[0] == "LISTSERVERS" && clientSocket == client_sock) {
+        for (auto const& pair : clients) {
+            std::cout << pair.second->name << std::endl;
+        }
     } else if(tokens[0] == "Group14isthebest") {
         client_sock = clientSocket;
     } else if(tokens[0] == "SENDMSG" && clientSocket == client_sock) {
