@@ -29,8 +29,6 @@ public:
     std::string name;
     std::string ip;
     int port;
-    std::string ip;
-
 
     Client(int socket, std::string ipAddr, int portNumber) : sock(socket), ip(ipAddr), port(portNumber) {}
     ~Client() {}
@@ -237,8 +235,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         pollfds.push_back(pfd);
 
         // Add to clients map
-        clients[outSock] = new Client(outSock, port);
-        clients[outSock]->ip = ip;
+        clients[outSock] = new Client(outSock, ip, port);
 
         std::cout << "Connected to remote server at " << ip << ":" << port 
                   << " (sock fd: " << outSock << ")" << std::endl;
@@ -373,8 +370,7 @@ int main(int argc, char* argv[]) {
                         char ipStr[INET_ADDRSTRLEN];
                         inet_ntop(AF_INET, &(client.sin_addr), ipStr, INET_ADDRSTRLEN);
                         
-                        clients[clientSock] = new Client(clientSock, clientPort);
-                        clients[clientSock]->ip = std::string(ipStr);
+                        clients[clientSock] = new Client(clientSock, std::string(ipStr), clientPort);
 
                         std::cout << "Client connected: " << clientSock 
                                 << " (port " << clientPort << ")" << std::endl;
