@@ -26,10 +26,11 @@ class Client {
 public:
     int sock;
     std::string name;
+    std::string ip;
     int port;
 
 
-    Client(int socket, int portNumber) : sock(socket), port(portNumber) {}
+    Client(int socket, std::string ipAddr, int portNumber) : sock(socket), ip(ipAddr), port(portNumber) {}
     ~Client() {}
 };
 
@@ -80,6 +81,25 @@ void closeClient(int clientSocket, std::vector<struct pollfd> &pollfds) {
     pollfds.erase(std::remove_if(pollfds.begin(), pollfds.end(),
         [clientSocket](struct pollfd &p) { return p.fd == clientSocket; }),
         pollfds.end());
+}
+
+// Create formatted message
+// Format: <SOH><length><STX><payload><ETX>
+std::string createMessage(const std::string &payload) {
+    std::string msg;
+    uint16_t total_length = 5 + payload.length(); // SOH + length(2) + STX + payload + ETX
+    
+    msg += (char)0x01; // SOH
+    
+    // Add length in network byte order
+    uint16_t net_length = htons(total_length);
+    msg.append((char*)&net_length, 2);
+    
+    msg += (char)0x02; // STX
+    msg += payload;
+    msg += (char)0x03; // ETX
+    
+    return msg;
 }
 
 // Parse formatted message and extract payload
@@ -183,7 +203,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         pollfds.push_back(pfd);
 
         // Add to clients map
-        clients[outSock] = new Client(outSock, port);
+        clients[outSock] = new Client(outSock, ip, port);
 
         std::cout << "Connected to remote server at " << ip << ":" << port 
                   << " (sock fd: " << outSock << ")" << std::endl;
@@ -222,7 +242,28 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         std::string command = tokens[0].substr(0, commaPos);  // "HELO"
         std::string groupID = tokens[0].substr(commaPos + 1); // "<FROM_GROUP_ID>"
         
-        std::cout << "Recognized HELO command from: " << groupID << std::endl;
+        std::cout << "Received HELO from: " << groupID << std::endl;
+        
+        // Save the group ID for this client
+        if (clients.find(clientSocket) != clients.end()) {
+            clients[clientSocket]->name = groupID;
+        }
+        
+        // Build SERVERS response with all connected servers
+        std::string response = "SERVERS," + groupID + "," + clients[clientSocket]->ip + "," + std::to_string(clients[clientSocket]->port);
+        
+        // Add all other connected servers (those with a name)
+        for (auto const& pair : clients) {
+            if (pair.first != clientSocket && !pair.second->name.empty()) {
+                response += ";" + pair.second->name + "," + pair.second->ip + "," + std::to_string(pair.second->port);
+            }
+        }
+        
+        // Format and send the message
+        std::string formattedMsg = createMessage(response);
+        send(clientSocket, formattedMsg.c_str(), formattedMsg.length(), 0);
+        
+        std::cout << "Sent SERVERS response: " << response << std::endl;
     } else {
         std::cout << "Unknown command from client: " << buffer << std::endl;
     }
@@ -277,11 +318,13 @@ int main(int argc, char* argv[]) {
                         pfd.events = POLLIN;
                         pollfds.push_back(pfd);
 
+                        char clientIP[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &client.sin_addr, clientIP, INET_ADDRSTRLEN);
                         int clientPort = ntohs(client.sin_port);
-                        clients[clientSock] = new Client(clientSock, clientPort);
+                        clients[clientSock] = new Client(clientSock, std::string(clientIP), clientPort);
 
                         std::cout << "Client connected: " << clientSock 
-                                << " (port " << clientPort << ")" << std::endl;
+                                << " from " << clientIP << ":" << clientPort << std::endl;
                     }
                 } else {
                     memset(buffer, 0, sizeof(buffer));
