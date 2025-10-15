@@ -258,6 +258,8 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
     std::stringstream stream(buffer);
     std::string token;
 
+    (void)port; // suppress unused parameter warning; keep signature for future use
+
     while(stream >> token) tokens.push_back(token);
 
     if(tokens.empty()) return;
