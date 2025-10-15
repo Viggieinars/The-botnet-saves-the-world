@@ -317,14 +317,20 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
     } else if(tokens[0] == "SENDMSG" && clientSocket == client_sock) {
         if(tokens.size() < 3) return;
 
-        std::string groupID = tokens[1];
+        std::string toGroupID = tokens[1];
         std::string msg;
-        for(auto i = tokens.begin()+2; i != tokens.end(); i++)
-            msg += *i + " ";
+        for(auto i = tokens.begin()+2; i != tokens.end(); i++) {
+            if(i != tokens.begin()+2) msg += " ";
+            msg += *i;
+        }
 
+        // Format: SENDMSG,<TO_GROUP_ID>,<FROM_GROUP_ID>,<message>
+        std::string formattedMsg = "SENDMSG," + toGroupID + "," + myGroupID + "," + msg;
+        
         for (auto const& pair : clients) {
-            if (pair.second->name == groupID) {
-                send(pair.second->sock, msg.c_str(), msg.length(), 0);
+            if (pair.second->name == toGroupID) {
+                sendFormattedMessage(pair.second->sock, formattedMsg);
+                std::cout << "Sent message to " << toGroupID << std::endl;
                 break;
             }
         }
