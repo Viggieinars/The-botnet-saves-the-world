@@ -66,6 +66,10 @@ void sendFormattedMessage(int sock, const std::string& msg) {
     sendbuf[3] = 0x02;
     memcpy(&sendbuf[4], msg.c_str(), msg.length());
     sendbuf[4 + msg.length()] = 0x03;
+    
+    // Debug: print what we're sending
+    std::cout << "  -> Sending: len=" << len << " msg=\"" << msg << "\"" << std::endl;
+    
     send(sock, sendbuf, len, 0);
 }
 
@@ -268,8 +272,10 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
             std::string toGroupID = tokens[1];
             std::string msg;
-            for(auto i = tokens.begin()+2; i != tokens.end(); i++)
-                msg += *i + " ";
+            for(auto i = tokens.begin()+2; i != tokens.end(); i++) {
+                if(i != tokens.begin()+2) msg += " ";  // Add space between words, but not at start
+                msg += *i;
+            }
 
             // Format: SENDMSG,<TO GROUP ID>,<FROM GROUP ID>,<Message content>
             std::string formattedMsg = "SENDMSG," + toGroupID + "," + myGroupID + "," + msg;
@@ -288,8 +294,10 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             std::string toGroupID = tokens[1];
             std::string fromGroupID = tokens[2];
             std::string msg;
-            for(auto i = tokens.begin()+3; i != tokens.end(); i++)
-                msg += *i + " ";
+            for(auto i = tokens.begin()+3; i != tokens.end(); i++) {
+                if(i != tokens.begin()+3) msg += " ";
+                msg += *i;
+            }
 
             if(toGroupID == myGroupID) {
                 // Message is for us - store it
@@ -414,8 +422,13 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             sendFormattedMessage(clientSocket, payload);
             std::cout << "Sent SERVERS to " << groupID << ": " << payload << std::endl;
         }
+    } else if(tokens[0] == "ERROR") {
+        // ERROR message from another server - Expected format: ERROR,<FROM>,<TO>,<error message>
+        std::cerr << "ERROR received: " << buffer << std::endl;
+        // Don't close connection on errors, just log them
     } else {
-        std::cout << "Unknown command from client: " << buffer << std::endl;
+        // Unknown command - log it but don't close connection if it's from another server
+        std::cout << "Unknown command: " << buffer << std::endl;
     }
 }
 
@@ -454,6 +467,16 @@ int main(int argc, char* argv[]) {
         }
 
         for(size_t i = 0; i < pollfds.size(); i++) {
+            // Handle POLLERR and POLLHUP - connection errors
+            if(pollfds[i].revents & (POLLERR | POLLHUP)) {
+                if(pollfds[i].fd != listenSock) {
+                    std::cerr << "Connection error or hangup on fd " << pollfds[i].fd << std::endl;
+                    closeClient(pollfds[i].fd, pollfds);
+                    i--;
+                    continue;
+                }
+            }
+            
             // Handle POLLOUT - outgoing connection established
             if(pollfds[i].revents & POLLOUT) {
                 int fd = pollfds[i].fd;
