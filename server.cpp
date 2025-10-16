@@ -374,6 +374,19 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             text += tokens[i];
         }
         deliverOrQueueMessage(toGroup, fromGroup, text);
+    } else if (tokens[0].rfind("SENDMSG,", 0) == 0) {
+        // Robust comma parsing for single-token form: SENDMSG,<TO>,<FROM>,<TEXT>
+        const std::string &s = tokens[0];
+        size_t p1 = s.find(',');
+        if (p1 == std::string::npos) return;
+        size_t p2 = s.find(',', p1 + 1);
+        if (p2 == std::string::npos) return;
+        size_t p3 = s.find(',', p2 + 1);
+        if (p3 == std::string::npos) return;
+        std::string toGroup = s.substr(p1 + 1, p2 - (p1 + 1));
+        std::string fromGroup = s.substr(p2 + 1, p3 - (p2 + 1));
+        std::string text = s.substr(p3 + 1);
+        deliverOrQueueMessage(toGroup, fromGroup, text);
     } else if(tokens[0] == "GETMSGS" && tokens.size() >= 2) {
         // GETMSGS,<GROUP ID> — return one queued message for that group if any
         std::string target = tokens[1];
@@ -384,6 +397,19 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             std::string entry = itp->second.front();
             itp->second.pop_front();
             // entry is FROM,TEXT; reply as SENDMSG,<TO>,<FROM>,<TEXT>
+            std::ostringstream resp;
+            resp << "SENDMSG," << target << "," << entry;
+            sendFormattedMessage(clientSocket, resp.str());
+        }
+    } else if (tokens[0].rfind("GETMSGS,", 0) == 0) {
+        // Support comma-prefixed single token: GETMSGS,<GROUP>
+        std::string target = tokens[0].substr(8);
+        auto itp = pendingMessagesByGroup.find(target);
+        if (target.empty() || itp == pendingMessagesByGroup.end() || itp->second.empty()) {
+            sendFormattedMessage(clientSocket, std::string("NO_MSG"));
+        } else {
+            std::string entry = itp->second.front();
+            itp->second.pop_front();
             std::ostringstream resp;
             resp << "SENDMSG," << target << "," << entry;
             sendFormattedMessage(clientSocket, resp.str());
