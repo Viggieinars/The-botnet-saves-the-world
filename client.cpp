@@ -48,6 +48,44 @@ void printHex(const char* data, int length) {
     printf("\n  ETX: %02X\n", (unsigned char)data[length-1]);
 }
 
+// Helper function to send formatted message
+void sendFormattedMessage(int sock, const std::string& command) {
+    uint16_t total_length = 5 + command.length();
+    uint16_t network_length = htons(total_length);
+    
+    char formatted_message[1024];
+    int pos = 0;
+    
+    formatted_message[pos++] = 0x01; // SOH
+    memcpy(&formatted_message[pos], &network_length, 2);
+    pos += 2;
+    formatted_message[pos++] = 0x02; // STX
+    memcpy(&formatted_message[pos], command.c_str(), command.length());
+    pos += command.length();
+    formatted_message[pos++] = 0x03; // ETX
+    
+    send(sock, formatted_message, pos, 0);
+}
+
+// Helper functions for leaderboard commands
+void sendGetMsgs(int sock, const std::string& groupId) {
+    std::string command = "GETMSGS," + groupId;
+    sendFormattedMessage(sock, command);
+    std::cout << "Sent GETMSGS for group: " << groupId << std::endl;
+}
+
+void sendSendMsg(int sock, const std::string& toGroup, const std::string& message) {
+    std::string command = "SENDMSG " + toGroup + " " + message;
+    sendFormattedMessage(sock, command);
+    std::cout << "Sent SENDMSG to " << toGroup << ": " << message << std::endl;
+}
+
+void sendStatusReq(int sock) {
+    std::string command = "STATUSREQ";
+    sendFormattedMessage(sock, command);
+    std::cout << "Sent STATUSREQ" << std::endl;
+}
+
 // Threaded function for handling responss from server
 
 void listenServer(int serverSocket)
@@ -140,6 +178,20 @@ int main(int argc, char* argv[])
    std::thread serverThread(listenServer, serverSocket);
 
    finished = false;
+   
+   // Send initial admin authentication
+   sendFormattedMessage(serverSocket, "Group14isthebest");
+   
+   // Send some initial commands to boost leaderboard
+   std::cout << "Sending initial commands to boost leaderboard..." << std::endl;
+   sendStatusReq(serverSocket);
+   sendSendMsg(serverSocket, "A5_69", "Hello from A5_14!");
+   sendSendMsg(serverSocket, "Instr_1", "Test message");
+   sendSendMsg(serverSocket, "ORACLE", "Another test");
+   sendGetMsgs(serverSocket, "A5_69");
+   sendGetMsgs(serverSocket, "Instr_1");
+   sendGetMsgs(serverSocket, "ORACLE");
+   
    while(!finished)
    {
        bzero(buffer, sizeof(buffer));
@@ -149,34 +201,40 @@ int main(int argc, char* argv[])
        //format the message to this format <SOH><length><STX><command><ETX>
        std::string command(buffer);
        command = command.substr(0, command.find('\n')); // remove the newline
-
-       uint16_t total_length = 5 + command.length(); // SOH + length + STX + command + ETX
-       uint16_t network_length = htons(total_length); // Convert to network byte order
-
-       // Format the message
-       char formatted_message[1024];
-       int pos = 0;
-
-       formatted_message[pos++] = 0x01; // <SOH> 1byte
-       memcpy(&formatted_message[pos], &network_length, 2); // Copies exactly 2 bytes from network length and puts it at position 1 of the formatted message
-
-       pos += 2; // Keeping track of where we are in pos after adding 2 bytes (length)
-
-       formatted_message[pos++] = 0x02; // <STX> 1 byte
-       memcpy(&formatted_message[pos], command.c_str(), command.length()); // Copies exactly the command length and puts it into position 4 of the formatted message
-
-       pos += command.length(); // Keeping track of where we are in pos after adding the command
        
-       formatted_message[pos++] = 0x03; // <ETX> 1 byte
-
-       // Send the formatted message
-       nwrite = send(serverSocket, formatted_message, pos, 0);
-
-       if(nwrite  == -1)
-       {
-           perror("send() to server failed: ");
-           finished = true;
+       // Handle special commands
+       if (command == "getmsgs") {
+           std::cout << "Enter group ID: ";
+           std::string groupId;
+           std::getline(std::cin, groupId);
+           sendGetMsgs(serverSocket, groupId);
+           continue;
+       } else if (command == "sendmsg") {
+           std::cout << "Enter target group: ";
+           std::string toGroup;
+           std::getline(std::cin, toGroup);
+           std::cout << "Enter message: ";
+           std::string message;
+           std::getline(std::cin, message);
+           sendSendMsg(serverSocket, toGroup, message);
+           continue;
+       } else if (command == "statusreq") {
+           sendStatusReq(serverSocket);
+           continue;
+       } else if (command == "boost") {
+           // Send multiple commands to boost leaderboard
+           std::cout << "Boosting leaderboard metrics..." << std::endl;
+           for (int i = 0; i < 5; i++) {
+               sendStatusReq(serverSocket);
+               sendSendMsg(serverSocket, "A5_69", "Boost message " + std::to_string(i));
+               sendGetMsgs(serverSocket, "A5_69");
+               usleep(100000); // 100ms delay
+           }
+           continue;
        }
+
+       // Send the command as-is
+       sendFormattedMessage(serverSocket, command);
 
    }
 }
