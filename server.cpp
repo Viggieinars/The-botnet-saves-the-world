@@ -44,6 +44,9 @@ static std::map<int, time_t> lastKeepaliveSentAt;
 // Pending messages addressed by destination group id
 static std::map<std::string, std::list<std::string>> pendingMessagesByGroup;
 
+// Per-socket receive buffers to handle partial/multiple framed messages
+static std::map<int, std::string> recvBuffers;
+
 // Helper to set non-blocking
 void setNonBlocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
@@ -51,15 +54,16 @@ void setNonBlocking(int sock) {
 }
 
 void sendFormattedMessage(int sock, const std::string& msg) {
-    uint16_t len = msg.length() + 5;
-    char sendbuf[1024];
-    sendbuf[0] = 0x01;
+    uint16_t len = static_cast<uint16_t>(msg.length() + 5);
+    std::string sendbuf;
+    sendbuf.resize(len);
+    sendbuf[0] = (char)0x01;
     uint16_t len_n = htons(len);
     memcpy(&sendbuf[1], &len_n, 2);
-    sendbuf[3] = 0x02;
-    memcpy(&sendbuf[4], msg.c_str(), msg.length());
-    sendbuf[4 + msg.length()] = 0x03;
-    send(sock, sendbuf, len, 0);
+    sendbuf[3] = (char)0x02;
+    memcpy(&sendbuf[4], msg.data(), msg.length());
+    sendbuf[4 + msg.length()] = (char)0x03;
+    send(sock, sendbuf.data(), sendbuf.size(), 0);
 }
 
 // Return number of messages queued for a specific peer (by its group id)
@@ -177,7 +181,13 @@ int open_socket(int portno) {
 void closeClient(int clientSocket, std::vector<struct pollfd> &pollfds) {
     std::cout << "Client closed connection: " << clientSocket << std::endl;
     close(clientSocket);
-    clients.erase(clientSocket);
+    auto it = clients.find(clientSocket);
+    if (it != clients.end()) {
+        delete it->second;
+        clients.erase(it);
+    }
+    lastKeepaliveSentAt.erase(clientSocket);
+    recvBuffers.erase(clientSocket);
 
     pollfds.erase(std::remove_if(pollfds.begin(), pollfds.end(),
         [clientSocket](struct pollfd &p) { return p.fd == clientSocket; }),
@@ -325,16 +335,8 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             msg += *i;
         }
 
-        // Format: SENDMSG,<TO_GROUP_ID>,<FROM_GROUP_ID>,<message>
-        std::string formattedMsg = "SENDMSG," + toGroupID + "," + myGroupID + "," + msg;
-        
-        for (auto const& pair : clients) {
-            if (pair.second->name == toGroupID) {
-                sendFormattedMessage(pair.second->sock, formattedMsg);
-                std::cout << "Sent message to " << toGroupID << std::endl;
-                break;
-            }
-        }
+        // Use unified path to deliver immediately if connected, or queue otherwise
+        deliverOrQueueMessage(toGroupID, myGroupID, msg);
 
     } else if(tokens[0] == "GETMSG") {
         // TODO (legacy)
@@ -465,7 +467,7 @@ int main(int argc, char* argv[]) {
                     struct sockaddr_in client;
                     socklen_t clientLen = sizeof(client);
                     int clientSock = accept(listenSock, (struct sockaddr *)&client, &clientLen);
-                    if(clientSock >= 0) {
+                if(clientSock >= 0) {
                         setNonBlocking(clientSock);
 
                         struct pollfd pfd;
@@ -493,19 +495,58 @@ int main(int argc, char* argv[]) {
                         closeClient(pollfds[i].fd, pollfds);
                         i--; 
                     } else {
-                        // Parse the formatted message
-                        std::string payload;
-                        if (parseMessage(buffer, r, payload)) {
+                        // Append to per-socket buffer and extract as many frames as available
+                        std::string &acc = recvBuffers[pollfds[i].fd];
+                        acc.append(buffer, r);
+
+                        // Process frames in a loop
+                        while (true) {
+                            if (acc.size() < 5) break; // need at least header
+
+                            // Resync to SOH if necessary
+                            if ((unsigned char)acc[0] != 0x01) {
+                                size_t pos = acc.find((char)0x01);
+                                if (pos == std::string::npos) {
+                                    acc.clear();
+                                    break;
+                                } else {
+                                    acc.erase(0, pos);
+                                    if (acc.size() < 5) break;
+                                }
+                            }
+
+                            uint16_t total_length = 0;
+                            memcpy(&total_length, &acc[1], 2);
+                            total_length = ntohs(total_length);
+
+                            if (acc.size() < total_length) {
+                                // wait for more data
+                                break;
+                            }
+
+                            // Validate STX and ETX
+                            if ((unsigned char)acc[3] != 0x02 || (unsigned char)acc[total_length - 1] != 0x03) {
+                                // Drop SOH and try to resync
+                                acc.erase(0, 1);
+                                continue;
+                            }
+
+                            // Extract payload
+                            int payload_length = total_length - 5;
+                            std::string payload;
+                            if (payload_length > 0) {
+                                payload.assign(&acc[4], payload_length);
+                            }
+
+                            // Consume this frame
+                            acc.erase(0, total_length);
+
+                            // Dispatch payload as command
                             std::cout << "Received command: " << payload << std::endl;
-                            // Convert payload to char* for clientCommand
                             char cmd_buffer[1025];
                             strncpy(cmd_buffer, payload.c_str(), sizeof(cmd_buffer) - 1);
                             cmd_buffer[sizeof(cmd_buffer) - 1] = '\0';
-                            
                             clientCommand(pollfds[i].fd, cmd_buffer, pollfds, port);
-                        } else {
-                            std::cerr << "Failed to parse message from client " 
-                                      << pollfds[i].fd << std::endl;
                         }
                     }
                 }
