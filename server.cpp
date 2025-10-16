@@ -368,7 +368,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
     } else if (tokens[0].rfind("KEEPALIVE,", 0) == 0) {
         // Parse incoming KEEPALIVE,<n> (optional; currently ignored beyond validation)
     } else if (tokens[0].find("HELO,") == 0) {
-        // Expected: HELO,<FROM_GROUP_ID>[,<PORT>]; reply with HELO,<MY_GROUP_ID>
+        // Expected: HELO,<FROM_GROUP_ID>[,<PORT>]; reply with SERVERS list per spec
         std::vector<std::string> parts;
         std::stringstream ss(tokens[0]);
         std::string item;
@@ -384,9 +384,24 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             }
         }
 
-        std::string heloReply = std::string("HELO,") + myGroupID;
-        sendFormattedMessage(clientSocket, heloReply);
-        std::cout << "Replied HELO: " << heloReply << std::endl;
+        // Build SERVERS response: first entry must be our own (group, ip, listen port)
+        std::ostringstream resp;
+        resp << "SERVERS,";
+        resp << myGroupID << "," << getLocalIPAddress() << "," << port << ";";
+
+        // Append directly connected 1-hop servers (exclude admin and empty names)
+        for (const auto &kv : clients) {
+            const Client* c = kv.second;
+            if (!c) continue;
+            if (kv.first == client_sock) continue; // skip admin client
+            if (c->name.empty()) continue; // only identified peers
+            if (c->name == myGroupID) continue; // avoid listing ourselves again
+            resp << c->name << "," << c->ip << "," << c->port << ";";
+        }
+
+        std::string serversMsg = resp.str();
+        sendFormattedMessage(clientSocket, serversMsg);
+        std::cout << "Replied SERVERS: " << serversMsg << std::endl;
     } else if (tokens[0].find("SERVERS") == 0) {
         std::cout << "Processing SERVERS response" << std::endl;
 
@@ -420,6 +435,7 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                 }
             }
         }
+        return;
     } else {
         std::cout << "Unknown command from client: " << buffer << std::endl;
     }
