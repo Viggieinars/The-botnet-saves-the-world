@@ -367,6 +367,18 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         }
     } else if (tokens[0].rfind("KEEPALIVE,", 0) == 0) {
         // Parse incoming KEEPALIVE,<n> (optional; currently ignored beyond validation)
+    } else if (tokens[0] == "STATUSREQ") {
+        // Build STATUSRESP,<group,count>,...
+        std::ostringstream resp;
+        resp << "STATUSRESP";
+        bool first = true; (void)first; // kept for readability
+        for (const auto &kv : pendingMessagesByGroup) {
+            const std::string &group = kv.first;
+            unsigned int count = static_cast<unsigned int>(kv.second.size());
+            resp << "," << group << "," << count;
+        }
+        sendFormattedMessage(clientSocket, resp.str());
+        std::cout << "Replied STATUSRESP: " << resp.str() << std::endl;
     } else if (tokens[0].find("HELO,") == 0) {
         // Expected: HELO,<FROM_GROUP_ID>[,<PORT>]; reply with SERVERS list per spec
         std::vector<std::string> parts;
