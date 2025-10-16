@@ -181,16 +181,6 @@ int main(int argc, char* argv[])
    // Send initial admin authentication
    sendFormattedMessage(serverSocket, "Group14isthebest");
    
-   // Send some initial commands to boost leaderboard
-   std::cout << "Sending initial commands to boost leaderboard..." << std::endl;
-   sendStatusReq(serverSocket);
-   sendSendMsg(serverSocket, "A5_69", "Hello from A5_14!");
-   sendSendMsg(serverSocket, "Instr_1", "Test message");
-   sendSendMsg(serverSocket, "ORACLE", "Another test");
-   sendGetMsgs(serverSocket, "A5_69");
-   sendGetMsgs(serverSocket, "Instr_1");
-   sendGetMsgs(serverSocket, "ORACLE");
-   
    while(!finished)
    {
        bzero(buffer, sizeof(buffer));
