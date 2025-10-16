@@ -458,8 +458,46 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
                 std::cout << "Discovered: " << group << " at " << ip << ":" << partPort << std::endl;
 
-                if (partPort != 1) {
-                    // TODO: Reyna að tengjast fleiri serverum sem að eru discovered
+                if (partPort > 0) {
+                    // Check if already connected by group or ip:port
+                    bool alreadyConnected = false;
+                    for (const auto &ckv : clients) {
+                        const Client* c = ckv.second;
+                        if (!c) continue;
+                        if (!c->name.empty() && c->name == group) { alreadyConnected = true; break; }
+                        if (c->ip == ip && c->port == partPort) { alreadyConnected = true; break; }
+                    }
+
+                    if (!alreadyConnected) {
+                        int outSock = socket(AF_INET, SOCK_STREAM, 0);
+                        if (outSock < 0) {
+                            perror("Failed to create outgoing socket");
+                        } else {
+                            setNonBlocking(outSock);
+                            struct sockaddr_in serverAddr;
+                            memset(&serverAddr, 0, sizeof(serverAddr));
+                            serverAddr.sin_family = AF_INET;
+                            serverAddr.sin_port = htons(partPort);
+                            if (inet_pton(AF_INET, ip.c_str(), &serverAddr.sin_addr) <= 0) {
+                                std::cerr << "Invalid IP address from SERVERS: " << ip << std::endl;
+                                close(outSock);
+                            } else {
+                                if (connect(outSock, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
+                                    if (errno != EINPROGRESS) {
+                                        perror("Connect failed");
+                                        close(outSock);
+                                    }
+                                }
+
+                                struct pollfd npfd; npfd.fd = outSock; npfd.events = POLLIN; pollfds.push_back(npfd);
+                                clients[outSock] = new Client(outSock, ip, partPort);
+                                std::cout << "Auto-connecting to discovered server " << group << " at " << ip << ":" << partPort << std::endl;
+
+                                std::string heloMsg = "HELO," + myGroupID;
+                                sendFormattedMessage(outSock, heloMsg);
+                            }
+                        }
+                    }
                 }
             }
         }
