@@ -42,6 +42,8 @@ std::map<int, Client*> clients;
 static std::map<int, time_t> lastKeepaliveSentAt;
 // Track last time we received KEEPALIVE from each peer
 static std::map<int, time_t> lastKeepaliveHeardAt;
+// Cooldown for auto-connect attempts by ip:port
+static std::map<std::string, time_t> lastAutoConnectAttemptAt;
 
 // Pending messages addressed by destination group id
 static std::map<std::string, std::list<std::string>> pendingMessagesByGroup;
@@ -330,9 +332,20 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         std::string heloMsg = "HELO," + myGroupID;
         sendFormattedMessage(outSock, heloMsg);
     } else if (tokens[0] == "LISTSERVERS" && clientSocket == client_sock) {
-        for (auto const& pair : clients) {
-            std::cout << pair.second->name << std::endl;
+        // Reply with SERVERS list to the admin client
+        std::ostringstream resp;
+        resp << "SERVERS,";
+        resp << myGroupID << "," << getLocalIPAddress() << "," << port << ";";
+        for (const auto &kv : clients) {
+            const Client* c = kv.second;
+            if (!c) continue;
+            if (kv.first == client_sock) continue; // skip admin
+            if (c->name.empty()) continue; // only identified peers
+            if (c->name == myGroupID) continue; // avoid listing ourselves again
+            resp << c->name << "," << c->ip << "," << c->port << ";";
         }
+        sendFormattedMessage(clientSocket, resp.str());
+        std::cout << "Replied LISTSERVERS with: " << resp.str() << std::endl;
     } else if(tokens[0] == "Group14isthebest") {
         client_sock = clientSocket;
     } else if(tokens[0] == "SENDMSG" && clientSocket == client_sock) {
@@ -421,6 +434,21 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                 Client* sender = clients[clientSocket];
                 sender->name = peerGroup;
             }
+
+            // Deduplicate: if another socket already claims this group, close the older one (keep lowest fd)
+            int existingFd = -1;
+            for (const auto &kv2 : clients) {
+                if (kv2.first == clientSocket) continue;
+                const Client* other = kv2.second;
+                if (!other) continue;
+                if (other->name == peerGroup) { existingFd = kv2.first; break; }
+            }
+            if (existingFd != -1) {
+                int keepFd = std::min(existingFd, clientSocket);
+                int dropFd = (keepFd == existingFd) ? clientSocket : existingFd;
+                std::cout << "Duplicate connection for group " << peerGroup << ", closing fd " << dropFd << std::endl;
+                closeClient(dropFd, pollfds);
+            }
         }
 
         // Build SERVERS response: first entry must be our own (group, ip, listen port)
@@ -484,6 +512,15 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                     }
 
                     if (!alreadyConnected) {
+                        // Cooldown guard (60s) per ip:port
+                        std::ostringstream key; key << ip << ":" << partPort;
+                        time_t now = time(nullptr);
+                        auto itLast = lastAutoConnectAttemptAt.find(key.str());
+                        if (itLast != lastAutoConnectAttemptAt.end() && difftime(now, itLast->second) < 60.0) {
+                            continue;
+                        }
+                        lastAutoConnectAttemptAt[key.str()] = now;
+
                         int outSock = socket(AF_INET, SOCK_STREAM, 0);
                         if (outSock < 0) {
                             perror("Failed to create outgoing socket");
