@@ -40,6 +40,8 @@ std::map<int, Client*> clients;
 
 // Track last time we sent KEEPALIVE to each peer (once/minute per peer)
 static std::map<int, time_t> lastKeepaliveSentAt;
+// Track last time we received KEEPALIVE from each peer
+static std::map<int, time_t> lastKeepaliveHeardAt;
 
 // Pending messages addressed by destination group id
 static std::map<std::string, std::list<std::string>> pendingMessagesByGroup;
@@ -79,6 +81,13 @@ static unsigned int getPendingCountForPeer(const Client* peer)
 // Enqueue a message for a group, or deliver immediately if that group is connected
 static void deliverOrQueueMessage(const std::string &toGroup, const std::string &fromGroup, const std::string &text)
 {
+    // Enforce max command payload size (spec: <= 5000 bytes)
+    const size_t MAX_CMD_LEN = 5000;
+    const size_t estimatedLen = strlen("SENDMSG,,,") + toGroup.size() + fromGroup.size() + text.size();
+    if (estimatedLen > MAX_CMD_LEN) {
+        std::cerr << "SENDMSG too large (" << estimatedLen << ") - dropping" << std::endl;
+        return;
+    }
     // Immediate delivery to connected peer whose group name matches destination
     for (const auto &kv : clients) {
         const Client* c = kv.second;
@@ -188,6 +197,7 @@ void closeClient(int clientSocket, std::vector<struct pollfd> &pollfds) {
     }
     lastKeepaliveSentAt.erase(clientSocket);
     recvBuffers.erase(clientSocket);
+    lastKeepaliveHeardAt.erase(clientSocket);
 
     pollfds.erase(std::remove_if(pollfds.begin(), pollfds.end(),
         [clientSocket](struct pollfd &p) { return p.fd == clientSocket; }),
@@ -366,7 +376,8 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             sendFormattedMessage(clientSocket, resp.str());
         }
     } else if (tokens[0].rfind("KEEPALIVE,", 0) == 0) {
-        // Parse incoming KEEPALIVE,<n> (optional; currently ignored beyond validation)
+        // Parse incoming KEEPALIVE,<n>; update last-heard timestamp
+        lastKeepaliveHeardAt[clientSocket] = time(nullptr);
     } else if (tokens[0] == "STATUSREQ") {
         // Build STATUSRESP,<group,count>,... for all known peers and queued groups
         std::map<std::string, unsigned int> countsByGroup;
@@ -642,6 +653,22 @@ int main(int argc, char* argv[]) {
         // Attempt periodic KEEPALIVE to identified peers (rate-limited)
         for (const auto &kv : clients) {
             maybeSendKeepalive(kv.first);
+        }
+
+        // Log stale peers with no incoming keepalive for > 3 minutes (non-fatal)
+        time_t now = time(nullptr);
+        for (const auto &kv : clients) {
+            int fd = kv.first;
+            if (fd == client_sock) continue; // skip admin
+            auto itHeard = lastKeepaliveHeardAt.find(fd);
+            if (itHeard == lastKeepaliveHeardAt.end()) continue;
+            double secs = difftime(now, itHeard->second);
+            if (secs > 180.0) {
+                const Client* c = kv.second;
+                std::cerr << "Warning: no KEEPALIVE heard from "
+                          << (c && !c->name.empty() ? c->name : std::to_string(fd))
+                          << " for " << (int)secs << "s" << std::endl;
+            }
         }
     }
 
