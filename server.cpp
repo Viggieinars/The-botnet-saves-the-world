@@ -452,6 +452,10 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                 std::string ip = parts[1];
                 int partPort = std::stoi(parts[2]);
 
+                // Basic validation: skip self, empty group/ip, non-positive port
+                if (group.empty() || ip.empty() || partPort <= 0) {
+                    continue;
+                }
                 if (group == myGroupID) {
                     continue;
                 }
