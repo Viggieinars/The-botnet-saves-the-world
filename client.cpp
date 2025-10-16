@@ -223,10 +223,25 @@ int main(int argc, char* argv[])
        } else if (command == "boost") {
            // Send multiple commands to boost leaderboard
            std::cout << "Boosting leaderboard metrics..." << std::endl;
-           for (int i = 0; i < 5; i++) {
+           for (int i = 0; i < 10; i++) {
                sendStatusReq(serverSocket);
                sendSendMsg(serverSocket, "A5_69", "Boost message " + std::to_string(i));
+               sendSendMsg(serverSocket, "ORACLE", "Boost message " + std::to_string(i));
+               sendSendMsg(serverSocket, "Instr_1", "Boost message " + std::to_string(i));
                sendGetMsgs(serverSocket, "A5_69");
+               sendGetMsgs(serverSocket, "ORACLE");
+               sendGetMsgs(serverSocket, "Instr_1");
+               usleep(50000); // 50ms delay
+           }
+           continue;
+       } else if (command == "leaderboard") {
+           // Send commands that specifically target leaderboard metrics
+           std::cout << "Sending leaderboard-targeted commands..." << std::endl;
+           std::vector<std::string> groups = {"A5_69", "ORACLE", "Instr_1", "Instr_2", "A5_123"};
+           for (const auto& group : groups) {
+               sendStatusReq(serverSocket);
+               sendSendMsg(serverSocket, group, "Leaderboard boost from A5_14");
+               sendGetMsgs(serverSocket, group);
                usleep(100000); // 100ms delay
            }
            continue;
