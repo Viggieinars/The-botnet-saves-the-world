@@ -38,6 +38,9 @@ public:
 
 std::map<int, Client*> clients;
 
+// Forward declarations
+void sendFormattedMessage(int sock, const std::string& msg);
+
 // Track metrics for leaderboard
 static int sendmsgCount = 0;
 static int statusreqCount = 0;
