@@ -368,15 +368,31 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
     } else if (tokens[0].rfind("KEEPALIVE,", 0) == 0) {
         // Parse incoming KEEPALIVE,<n> (optional; currently ignored beyond validation)
     } else if (tokens[0] == "STATUSREQ") {
-        // Build STATUSRESP,<group,count>,...
+        // Build STATUSRESP,<group,count>,... for all known peers and queued groups
+        std::map<std::string, unsigned int> countsByGroup;
+
+        // Seed from queued messages
+        for (const auto &kv : pendingMessagesByGroup) {
+            countsByGroup[kv.first] = static_cast<unsigned int>(kv.second.size());
+        }
+
+        // Ensure all identified 1-hop peers are present (with 0 if none queued)
+        for (const auto &kv : clients) {
+            const Client* c = kv.second;
+            if (!c) continue;
+            if (kv.first == client_sock) continue; // skip admin
+            if (c->name.empty()) continue; // only identified peers
+            if (countsByGroup.find(c->name) == countsByGroup.end()) {
+                countsByGroup[c->name] = 0;
+            }
+        }
+
         std::ostringstream resp;
         resp << "STATUSRESP";
-        bool first = true; (void)first; // kept for readability
-        for (const auto &kv : pendingMessagesByGroup) {
-            const std::string &group = kv.first;
-            unsigned int count = static_cast<unsigned int>(kv.second.size());
-            resp << "," << group << "," << count;
+        for (const auto &kv : countsByGroup) {
+            resp << "," << kv.first << "," << kv.second;
         }
+
         sendFormattedMessage(clientSocket, resp.str());
         std::cout << "Replied STATUSRESP: " << resp.str() << std::endl;
     } else if (tokens[0].find("HELO,") == 0) {
