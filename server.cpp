@@ -329,6 +329,17 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
         // Route the message (immediate delivery or queue for later)
         routeMessage(toGroupID, myGroupID, msg);
+    
+    // GETMSG - retrieve one queued message for our group
+    } else if(tokens[0] == "GETMSG" && clientSocket == client_sock) {
+        auto itp = pendingMessagesByGroup.find(myGroupID);
+        if (itp == pendingMessagesByGroup.end() || itp->second.empty()) {
+            sendFormattedMessage(clientSocket, "NO_MSG");
+        } else {
+            sendFormattedMessage(clientSocket, "SENDMSG," + myGroupID + "," + itp->second.front());
+            LOG("SENT: Queued message for " << myGroupID << " to admin client");
+            itp->second.pop_front();
+        }
 
     //=============================================================================
     // PEER-TO-PEER MESSAGE ROUTING
