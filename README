@@ -1,7 +1,187 @@
-Byrja á því að starta server, starta síðan client og connecta við 5001
+# TSAM Assignment 5 - Botnet Messaging System
+Group: A5_14
+Server ID: A5_14
+TSAM Server: 130.208.246.98
 
-TSAM SERVER: 130.208.246.98
+## Development Environment
+- **OS:** macOS (developed and tested)
+- **Compiler:** g++ with C++11 standard
+- **Platform:** Compatible with Linux/Unix systems
 
-made on macOS for macOS
+## Compilation
+```bash
+make clean
+make
+```
 
+This produces two executables:
+- `tsamgroup14` - The server
+- `client` - The command and control client
 
+## Running the Server
+```bash
+./tsamgroup14 <port>
+```
+
+Example:
+```bash
+./tsamgroup14 4014
+```
+
+The server will:
+1. Listen on the specified port for incoming connections
+2. Accept connections from other servers and clients
+3. Automatically discover and connect to other servers in the botnet
+4. Route messages between groups
+5. Queue messages for offline groups
+6. Send periodic KEEPALIVE messages to maintain connections
+
+To run in background (keeps running after logout):
+```bash
+nohup ./tsamgroup14 4014 > server.log 2>&1 &
+```
+
+## Running the Client
+```bash
+./client <server_ip> <server_port>
+```
+
+Example (local):
+```bash
+./client 127.0.0.1 4014
+```
+
+Example (remote):
+```bash
+./client 130.208.246.98 4014
+```
+
+## Client Commands
+
+### Authentication
+- **CLIENTAUTH** - Authenticate as the admin client (required before other commands)
+
+### Connection Management
+- **CONNECT <ip> <port>** - Establish outgoing connection to another server
+  - Example: `CONNECT 130.208.246.98 5001`
+  - Server responds by sending HELO and automatically discovering other servers
+
+- **LISTSERVERS** - List all currently connected servers
+  - Shows server names, IPs, and ports
+
+### Messaging
+- **SENDMSG <group_id> <message>** - Send a message to another group
+  - Example: `SENDMSG A5_29 Hello from group 14!`
+  - If recipient is connected, delivers immediately
+  - If recipient is offline, queues message for later retrieval
+
+- **GETMSG** - Retrieve one queued message for your group
+  - Returns format: `SENDMSG,<to>,<from>,<message>`
+  - Returns `NO_MSG` if no messages are queued
+
+## Server Protocol Commands
+
+The server implements the following peer-to-peer protocol commands:
+
+### Handshake & Discovery
+- **HELO,<group_id>** - Initial handshake sent when connecting to another server
+  - Server responds with SERVERS list
+  
+- **SERVERS,<list>** - List of directly connected servers
+  - Format: `SERVERS,<name>,<ip>,<port>;<name>,<ip>,<port>;...`
+  - Server automatically attempts to connect to discovered servers
+
+### Maintenance
+- **KEEPALIVE,<message_count>** - Periodic heartbeat sent every 60 seconds
+  - Indicates number of queued messages for the recipient
+  - Used to detect dead connections
+
+### Messaging
+- **SENDMSG,<to>,<from>,<message>** - Peer-to-peer message routing
+  - Server routes to destination if connected
+  - Otherwise queues for later retrieval
+
+- **GETMSGS,<group_id>** - Retrieve queued messages (peer-to-peer version)
+  - Returns one message from the queue
+
+### Status
+- **STATUSREQ** - Request status from a peer
+- **STATUSRESP,<group>,<count>,...** - Response with queued message counts
+
+## Server Behavior
+
+### Automatic Connection Discovery
+When the server connects to any peer and receives a SERVERS list, it automatically:
+1. Parses the list of discovered servers
+2. Filters out duplicates and invalid entries
+3. Applies 60-second cooldown to prevent connection spam
+4. Attempts to connect to new servers (maintaining 3-8 connections)
+5. Sends HELO handshake to each new connection
+
+### Message Routing
+When a message is received:
+1. If destination matches a connected peer → forward immediately
+2. If destination is unknown/offline → queue for later retrieval
+3. Messages larger than 5000 bytes are dropped
+4. Queued messages are retrieved via GETMSG/GETMSGS commands
+
+### Connection Management
+- Accepts incoming connections from other servers and clients
+- Maintains 3-8 active peer connections (prioritizes student groups over instructor servers)
+- Detects duplicate connections and closes older ones
+- Cleans up all resources when connections close
+- Non-blocking I/O using poll() for concurrent connections
+
+### Logging
+All server activity is logged with timestamps to stdout:
+- Connection events (ACCEPT, CONNECT, close)
+- All sent and received protocol commands
+- Message routing decisions (immediate delivery vs queued)
+- Auto-discovery and connection attempts
+- KEEPALIVE heartbeats
+- Error conditions
+
+Log format: `[YYYY-MM-DD HH:MM:SS] <event>`
+
+### Protocol Framing
+All messages use the specified protocol format:
+```
+<SOH><length><STX><command><ETX>
+```
+- SOH (0x01): Start of Header
+- length: 16-bit unsigned integer in network byte order (total message length)
+- STX (0x02): Start of Text
+- command: The actual command/payload
+- ETX (0x03): End of Text
+
+The server includes frame synchronization to handle partial receives and malformed messages.
+
+## Additional Features
+
+### Connection Deduplication
+If two connections exist for the same group, the server keeps the connection with the lower socket file descriptor and closes the duplicate.
+
+### Cooldown Protection
+To prevent connection spam, the server enforces a 60-second cooldown before attempting to reconnect to the same IP:port combination.
+
+### Message Persistence
+Messages are stored in memory until retrieved or the server restarts. For production use, persistent storage would be recommended.
+
+## Testing
+
+The server has been tested with:
+- Multiple concurrent connections (instructor servers and peer groups)
+- Message routing and queuing
+- Auto-discovery and connection management
+- Connection recovery and duplicate handling
+- Protocol framing with partial receives
+
+See server logs for detailed execution traces.
+
+## Known Limitations
+
+- Messages are not persistent (lost on server restart)
+- No authentication between servers (assumes trusted network)
+- No encryption (plaintext communication)
+- Memory usage grows with queued messages (no expiration policy)
+- Maximum message size: 5000 bytes

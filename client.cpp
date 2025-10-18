@@ -69,22 +69,62 @@ void sendStatusReq(int sock) {
 
 void listenServer(int serverSocket)
 {
-    int nread;                                  // Bytes read from socket
-    char buffer[1025];                          // Buffer for reading input
+    int nread;
+    char buffer[1025];
+    std::string recvBuffer;  // Accumulate partial frames
 
     while(true)
     {
        memset(buffer, 0, sizeof(buffer));
        nread = read(serverSocket, buffer, sizeof(buffer));
 
-       if(nread == 0)                      // Server has dropped us
-       {
+       if(nread == 0) {
           printf("Over and Out\n");
           exit(0);
        }
        else if(nread > 0)
        {
-          printf("%s\n", buffer);
+          // Append to receive buffer
+          recvBuffer.append(buffer, nread);
+
+          // Parse protocol frames: <SOH><length><STX><payload><ETX>
+          while(true) {
+              if(recvBuffer.size() < 5) break;  // Need at least header
+
+              // Find SOH (0x01)
+              if((unsigned char)recvBuffer[0] != 0x01) {
+                  size_t pos = recvBuffer.find((char)0x01);
+                  if(pos == std::string::npos) {
+                      recvBuffer.clear();
+                      break;
+                  }
+                  recvBuffer.erase(0, pos);
+                  if(recvBuffer.size() < 5) break;
+              }
+
+              // Read length
+              uint16_t total_length;
+              memcpy(&total_length, &recvBuffer[1], 2);
+              total_length = ntohs(total_length);
+
+              // Wait for complete frame
+              if(recvBuffer.size() < total_length) break;
+
+              // Validate STX (0x02) and ETX (0x03)
+              if((unsigned char)recvBuffer[3] != 0x02 || 
+                 (unsigned char)recvBuffer[total_length - 1] != 0x03) {
+                  recvBuffer.erase(0, 1);
+                  continue;
+              }
+
+              // Extract payload
+              std::string payload = (total_length > 5) ? 
+                  recvBuffer.substr(4, total_length - 5) : "";
+              recvBuffer.erase(0, total_length);
+
+              // Display payload
+              printf("%s\n", payload.c_str());
+          }
        }
     }
 }
