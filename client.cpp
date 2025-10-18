@@ -27,27 +27,6 @@
 #include <thread>
 #include <map>
 
-// Debug function to print message in hex format
-void printHex(const char* data, int length) {
-    printf("Formatted message (%d bytes): ", length);
-    for(int i = 0; i < length; i++) {
-        printf("%02X ", (unsigned char)data[i]);
-    }
-    printf("\n");
-    
-    // Also print breakdown
-    printf("  SOH: %02X\n", (unsigned char)data[0]);
-    uint16_t len;
-    memcpy(&len, &data[1], 2);
-    printf("  Length (network): %04X (host: %d)\n", len, ntohs(len));
-    printf("  STX: %02X\n", (unsigned char)data[3]);
-    printf("  Command: ");
-    for(int i = 4; i < length - 1; i++) {
-        printf("%c", data[i]);
-    }
-    printf("\n  ETX: %02X\n", (unsigned char)data[length-1]);
-}
-
 // Helper function to send formatted message
 void sendFormattedMessage(int sock, const std::string& command) {
     uint16_t total_length = 5 + command.length();
@@ -67,7 +46,7 @@ void sendFormattedMessage(int sock, const std::string& command) {
     send(sock, formatted_message, pos, 0);
 }
 
-// Helper functions for leaderboard commands
+// Helper functions for client commands
 void sendGetMsgs(int sock, const std::string& groupId) {
     std::string command = "GETMSGS," + groupId;
     sendFormattedMessage(sock, command);
@@ -178,8 +157,8 @@ int main(int argc, char* argv[])
 
    finished = false;
    
-   // Send initial admin authentication
-   sendFormattedMessage(serverSocket, "Group14isthebest");
+   // Authenticate as admin client to enable SENDMSG/CONNECT commands
+   sendFormattedMessage(serverSocket, "CLIENTAUTH");
    
    while(!finished)
    {
@@ -209,31 +188,6 @@ int main(int argc, char* argv[])
            continue;
        } else if (command == "statusreq") {
            sendStatusReq(serverSocket);
-           continue;
-       } else if (command == "boost") {
-           // Send multiple commands to boost leaderboard
-           std::cout << "Boosting leaderboard metrics..." << std::endl;
-           for (int i = 0; i < 10; i++) {
-               sendStatusReq(serverSocket);
-               sendSendMsg(serverSocket, "A5_69", "Boost message " + std::to_string(i));
-               sendSendMsg(serverSocket, "ORACLE", "Boost message " + std::to_string(i));
-               sendSendMsg(serverSocket, "Instr_1", "Boost message " + std::to_string(i));
-               sendGetMsgs(serverSocket, "A5_69");
-               sendGetMsgs(serverSocket, "ORACLE");
-               sendGetMsgs(serverSocket, "Instr_1");
-               usleep(50000); // 50ms delay
-           }
-           continue;
-       } else if (command == "leaderboard") {
-           // Send commands that specifically target leaderboard metrics
-           std::cout << "Sending leaderboard-targeted commands..." << std::endl;
-           std::vector<std::string> groups = {"A5_69", "ORACLE", "Instr_1", "Instr_2", "A5_123"};
-           for (const auto& group : groups) {
-               sendStatusReq(serverSocket);
-               sendSendMsg(serverSocket, group, "Leaderboard boost from A5_14");
-               sendGetMsgs(serverSocket, group);
-               usleep(100000); // 100ms delay
-           }
            continue;
        }
 

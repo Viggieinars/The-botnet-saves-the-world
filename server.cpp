@@ -17,184 +17,145 @@
 #include <list>
 #include <algorithm>
 #include <time.h>
+#include <iomanip>
 
 #define BACKLOG 5
 
-int client_sock = -1;  // Initialize to invalid socket
-std::string myGroupID = "A5_14";
 
-// Client info
+std::string getTimestamp() {
+    time_t now = time(nullptr);
+    struct tm* timeinfo = localtime(&now);
+    char buffer[80];
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
+    return std::string(buffer);
+}
+
+// Logging macros with timestamps
+#define LOG(msg) std::cout << "[" << getTimestamp() << "] " << msg << std::endl
+#define LOG_ERROR(msg) std::cerr << "[" << getTimestamp() << "] ERROR: " << msg << std::endl
+
+int client_sock = -1;
+std::string myGroupID = "A5_14"; // Our group ID
+
+// Client/server connection info
 class Client {
 public:
-    int sock;
-    std::string name;
-    std::string ip;
-    int port;
+    int sock; // The socket number
+    std::string name; // The group ID - Empty until HELO
+    std::string ip; // The IP address of the server
+    int port; // The port of the server
 
-    // TODO: Hafa bara socket í constructor??
-    Client(int socket, std::string ipAddr, int portNumber) : sock(socket), ip(ipAddr), port(portNumber) {}
-    ~Client() {}
+    Client(int socket, std::string ipAddr, int portNumber) : sock(socket), ip(ipAddr), port(portNumber) {} // Constructor
+    ~Client() {} // Destructor
 };
 
-std::map<int, Client*> clients;
+std::map<int, Client*> clients; // Client map - Socket number to Client object
 
 // Forward declarations
 void sendFormattedMessage(int sock, const std::string& msg);
 
-// Track metrics for leaderboard
-static int sendmsgCount = 0;
-static int statusreqCount = 0;
-static int getmsgsCount = 0;
+static std::map<int, time_t> lastKeepaliveSentAt; // To only send keepalive once per minute
+static std::map<int, time_t> lastKeepaliveHeardAt; // To Detect dead connections
+static std::map<std::string, time_t> lastAutoConnectAttemptAt; // To Prevent spam
+static std::map<std::string, std::list<std::string>> pendingMessagesByGroup; // To Store messages for later delivery
+static std::map<int, std::string> recvBuffers; // To Store partial messages
 
-// Track last time we sent KEEPALIVE to each peer (once/minute per peer)
-static std::map<int, time_t> lastKeepaliveSentAt;
-// Track last time we received KEEPALIVE from each peer
-static std::map<int, time_t> lastKeepaliveHeardAt;
-// Cooldown for auto-connect attempts by ip:port
-static std::map<std::string, time_t> lastAutoConnectAttemptAt;
 
-// Helper to send commands to boost leaderboard metrics
-static void boostLeaderboardMetrics() {
-    time_t now = time(nullptr);
-    static time_t lastBoost = 0;
-    
-    // Boost every 30 seconds
-    if (difftime(now, lastBoost) < 30.0) return;
-    lastBoost = now;
-    
-    // Send STATUSREQ to all connected peers
-    for (const auto &kv : clients) {
-        if (kv.first == client_sock) continue; // skip admin
-        const Client* c = kv.second;
-        if (!c || c->name.empty()) continue;
-        
-        sendFormattedMessage(kv.first, "STATUSREQ");
-        statusreqCount++;
-        std::cout << "Sent STATUSREQ to " << c->name << " (total: " << statusreqCount << ")" << std::endl;
-        
-        // Send SENDMSG to other peers
-        for (const auto &kv2 : clients) {
-            if (kv2.first == kv.first || kv2.first == client_sock) continue;
-            const Client* other = kv2.second;
-            if (!other || other->name.empty()) continue;
-            
-            std::string sendmsgCmd = "SENDMSG," + other->name + "," + myGroupID + ",Hello from " + myGroupID;
-            sendFormattedMessage(kv.first, sendmsgCmd);
-            sendmsgCount++;
-            std::cout << "Sent SENDMSG via " << c->name << " to " << other->name << " (total: " << sendmsgCount << ")" << std::endl;
-            break; // Only send one message per peer per cycle
-        }
-    }
-    
-    // Send GETMSGS to instructor server to boost metrics
-    // Look for instructor server (Instr_1, Instr_2, etc.)
-    for (const auto &kv : clients) {
-        if (kv.first == client_sock) continue; // skip admin
-        const Client* c = kv.second;
-        if (!c || c->name.empty()) continue;
-        
-        // Check if this is an instructor server
-        if (c->name.find("Instr") == 0 || c->name == "ORACLE") {
-            std::vector<std::string> groups = {"A5_69", "ORACLE", "Instr_1", "Instr_2", "A5_123", "A5_14"};
-            for (const auto& group : groups) {
-                std::string getmsgsCmd = "GETMSGS," + group;
-                sendFormattedMessage(kv.first, getmsgsCmd);
-                getmsgsCount++;
-                std::cout << "Sent GETMSGS to " << c->name << " for " << group << " (total: " << getmsgsCount << ")" << std::endl;
-            }
-            break; // Only send to instructor servers
-        }
-    }
-}
-
-// Pending messages addressed by destination group id
-static std::map<std::string, std::list<std::string>> pendingMessagesByGroup;
-
-// Per-socket receive buffers to handle partial/multiple framed messages
-static std::map<int, std::string> recvBuffers;
-
-// Helper to set non-blocking
 void setNonBlocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 }
 
+
 void sendFormattedMessage(int sock, const std::string& msg) {
-    uint16_t len = static_cast<uint16_t>(msg.length() + 5);
+
+    const char SOH = 0x01;  // Start of Header
+    const char STX = 0x02;  // Start of Text
+    const char ETX = 0x03;  // End of Text
+    
+    uint16_t total_length = static_cast<uint16_t>(msg.length() + 5);
+    
     std::string sendbuf;
-    sendbuf.resize(len);
-    sendbuf[0] = (char)0x01;
-    uint16_t len_n = htons(len);
-    memcpy(&sendbuf[1], &len_n, 2);
-    sendbuf[3] = (char)0x02;
+    sendbuf.resize(total_length);
+    sendbuf[0] = SOH; // Add SOH
+    uint16_t network_length = htons(total_length);
+    memcpy(&sendbuf[1], &network_length, 2);
+    sendbuf[3] = STX; // Add STX
     memcpy(&sendbuf[4], msg.data(), msg.length());
-    sendbuf[4 + msg.length()] = (char)0x03;
+    sendbuf[4 + msg.length()] = ETX; // Add ETX
     send(sock, sendbuf.data(), sendbuf.size(), 0);
 }
 
-// Return number of messages queued for a specific peer (by its group id)
-static unsigned int getPendingCountForPeer(const Client* peer)
-{
+// Count how many messages are queued for a specific peer
+static unsigned int countQueuedMessages(const Client* peer) {
     if (peer == nullptr) return 0;
     if (peer->name.empty()) return 0;
+    
     auto it = pendingMessagesByGroup.find(peer->name);
     if (it == pendingMessagesByGroup.end()) return 0;
+    
     return static_cast<unsigned int>(it->second.size());
 }
 
-// Enqueue a message for a group, or deliver immediately if that group is connected
-static void deliverOrQueueMessage(const std::string &toGroup, const std::string &fromGroup, const std::string &text)
-{
-    // Enforce max command payload size (spec: <= 5000 bytes)
+
+// Route message to recipient (immediate delivery if connected, otherwise queue for later)
+static void routeMessage(const std::string &toGroup, const std::string &fromGroup, const std::string &text) {
+    
     const size_t MAX_CMD_LEN = 5000;
     const size_t estimatedLen = strlen("SENDMSG,,,") + toGroup.size() + fromGroup.size() + text.size();
+    
     if (estimatedLen > MAX_CMD_LEN) {
-        std::cerr << "SENDMSG too large (" << estimatedLen << ") - dropping" << std::endl;
+        LOG_ERROR("SENDMSG too large (" << estimatedLen << " bytes) - dropping message");
         return;
     }
-    // Immediate delivery to connected peer whose group name matches destination
+    
+    // Check if destination group is currently connected
     for (const auto &kv : clients) {
         const Client* c = kv.second;
         if (!c) continue;
+        
         if (c->name == toGroup) {
             std::ostringstream payload;
-            // Required format: SENDMSG,<TO GROUP ID>,<FROM GROUP ID>,<Message content>
             payload << "SENDMSG," << toGroup << "," << fromGroup << "," << text;
             sendFormattedMessage(kv.first, payload.str());
+            LOG("SENT: Message to " << toGroup << " from " << fromGroup << " via " << c->name);
             return;
         }
     }
-
-    // Not connected: queue for later retrieval by GETMSGS
+    
+    // Store message for later retrieval
     std::ostringstream stored;
-    stored << fromGroup << "," << text; // store as FROM,TEXT under the TO group key
+    stored << fromGroup << "," << text;
     pendingMessagesByGroup[toGroup].push_back(stored.str());
+    LOG("QUEUED: Message for " << toGroup << " from " << fromGroup << " (not connected)");
 }
 
-// Try to send KEEPALIVE,<No. of Messages> to the given peer if >=60s since last send
-static void maybeSendKeepalive(int peerSock)
-{
+
+static void sendKeepaliveIfDue(int peerSock) {
     time_t now = time(nullptr);
 
+    // Check if we already sent KEEPALIVE in the last 60 seconds
     auto it = lastKeepaliveSentAt.find(peerSock);
     if (it != lastKeepaliveSentAt.end()) {
-        if (difftime(now, it->second) < 60.0) return; // enforce once/minute
+        if (difftime(now, it->second) < 60.0) return;
     }
 
     auto cIt = clients.find(peerSock);
     if (cIt == clients.end() || cIt->second == nullptr) return;
 
     const Client* peer = cIt->second;
-    if (peer->name.empty()) return; // only identified 1-hop servers
-    if (peerSock == client_sock) return; // never the admin client
+    if (peer->name.empty()) return;
+    if (peerSock == client_sock) return;
 
-    unsigned int pendingCount = getPendingCountForPeer(peer);
+    unsigned int messageCount = countQueuedMessages(peer);
     std::ostringstream payload;
-    payload << "KEEPALIVE," << pendingCount;
+    payload << "KEEPALIVE," << messageCount;
     sendFormattedMessage(peerSock, payload.str());
+    LOG("SENT: KEEPALIVE," << messageCount << " to " << peer->name);
 
     lastKeepaliveSentAt[peerSock] = now;
 }
+
 
 std::string getLocalIPAddress() {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -250,94 +211,30 @@ int open_socket(int portno) {
     return sock;
 }
 
-// Close client connection and cleanup pollfds + clients
-void closeClient(int clientSocket, std::vector<struct pollfd> &pollfds) {
-    std::cout << "Client closed connection: " << clientSocket << std::endl;
+
+// Close connection and clean up all associated data structures
+void closeConnection(int clientSocket, std::vector<struct pollfd> &pollfds) {
+    LOG("Connection closed: socket " << clientSocket);
+    
     close(clientSocket);
+    
     auto it = clients.find(clientSocket);
     if (it != clients.end()) {
         delete it->second;
         clients.erase(it);
     }
+    
     lastKeepaliveSentAt.erase(clientSocket);
-    recvBuffers.erase(clientSocket);
     lastKeepaliveHeardAt.erase(clientSocket);
-
+    recvBuffers.erase(clientSocket);
+    
     pollfds.erase(std::remove_if(pollfds.begin(), pollfds.end(),
         [clientSocket](struct pollfd &p) { return p.fd == clientSocket; }),
         pollfds.end());
 }
 
-// Create formatted message
-// Format: <SOH><length><STX><payload><ETX>
-std::string createMessage(const std::string &payload) {
-    std::string msg;
-    uint16_t total_length = 5 + payload.length(); // SOH + length(2) + STX + payload + ETX
-    
-    msg += (char)0x01; // SOH
-    
-    // Add length in network byte order
-    uint16_t net_length = htons(total_length);
-    msg.append((char*)&net_length, 2);
-    
-    msg += (char)0x02; // STX
-    msg += payload;
-    msg += (char)0x03; // ETX
-    
-    return msg;
-}
 
-// Parse formatted message and extract payload
-// Format: <SOH><length><STX><payload><ETX>
-// Returns true if valid, false otherwise
-bool parseMessage(const char* buffer, int bufferLen, std::string &payload) {
-    if (bufferLen < 5) {
-        std::cerr << "Message too short" << std::endl;
-        return false;
-    }
-
-    // Check SOH (Start of Header)
-    if ((unsigned char)buffer[0] != 0x01) {
-        std::cerr << "Invalid SOH" << std::endl;
-        return false;
-    }
-
-    // Extract length (2 bytes in network byte order)
-    uint16_t total_length;
-    memcpy(&total_length, &buffer[1], 2);
-    total_length = ntohs(total_length);
-
-    // Verify we received the complete message
-    if (bufferLen < total_length) {
-        std::cerr << "Incomplete message: expected " << total_length 
-                  << " bytes, got " << bufferLen << std::endl;
-        return false;
-    }
-
-    // Check STX (Start of Text)
-    if ((unsigned char)buffer[3] != 0x02) {
-        std::cerr << "Invalid STX" << std::endl;
-        return false;
-    }
-
-    // Check ETX (End of Text)
-    if ((unsigned char)buffer[total_length - 1] != 0x03) {
-        std::cerr << "Invalid ETX" << std::endl;
-        return false;
-    }
-
-    // Extract payload (between STX and ETX)
-    int payload_length = total_length - 5; // total - (SOH + length + STX + ETX)
-    if (payload_length > 0) {
-        payload.assign(&buffer[4], payload_length);
-    } else {
-        payload.clear();
-    }
-
-    return true;
-}
-
-// Handle client commands
+// Command dispatcher - routes all incoming commands to appropriate handlers
 void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &pollfds, int port) {
     std::vector<std::string> tokens;
     std::stringstream stream(buffer);
@@ -349,6 +246,11 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
     if(tokens.empty()) return;
 
+    //=============================================================================
+    // ADMIN COMMANDS (from our authenticated client)
+    //=============================================================================
+
+    // CONNECT - establish outgoing connection to another server
     if(tokens[0] == "CONNECT" && tokens.size() == 3 && clientSocket == client_sock) {
         std::string ip = tokens[1];
         int port = std::stoi(tokens[2]);
@@ -388,13 +290,14 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         // Add to clients map
         clients[outSock] = new Client(outSock, ip, port);
 
-        std::cout << "Connected to remote server at " << ip << ":" << port 
-                  << " (sock fd: " << outSock << ")" << std::endl;
+        LOG("CONNECT: Outgoing connection to " << ip << ":" << port << " (socket " << outSock << ")");
 
         std::string heloMsg = "HELO," + myGroupID;
         sendFormattedMessage(outSock, heloMsg);
+        LOG("SENT: HELO," << myGroupID << " to " << ip << ":" << port);
+    
+    // LISTSERVERS - reply with list of connected servers
     } else if (tokens[0] == "LISTSERVERS" && clientSocket == client_sock) {
-        // Reply with SERVERS list to the admin client
         std::ostringstream resp;
         resp << "SERVERS,";
         resp << myGroupID << "," << getLocalIPAddress() << "," << port << ";";
@@ -407,9 +310,13 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             resp << c->name << "," << c->ip << "," << c->port << ";";
         }
         sendFormattedMessage(clientSocket, resp.str());
-        std::cout << "Replied LISTSERVERS with: " << resp.str() << std::endl;
-    } else if(tokens[0] == "Group14isthebest") {
+        LOG("SENT: " << resp.str());
+    
+    // CLIENTAUTH - authenticate admin client
+    } else if(tokens[0] == "CLIENTAUTH") {
         client_sock = clientSocket;
+    
+    // SENDMSG - send message from admin client to target group
     } else if(tokens[0] == "SENDMSG" && clientSocket == client_sock) {
         if(tokens.size() < 3) return;
 
@@ -420,24 +327,15 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             msg += *i;
         }
 
-        // Use unified path to deliver immediately if connected, or queue otherwise
-        deliverOrQueueMessage(toGroupID, myGroupID, msg);
+        // Route the message (immediate delivery or queue for later)
+        routeMessage(toGroupID, myGroupID, msg);
 
-    } else if(tokens[0] == "GETMSG") {
-        // TODO (legacy)
-    } else if(tokens[0] == "SENDMSG" && tokens.size() >= 4) {
-        // SENDMSG,<TO GROUP ID>,<FROM GROUP ID>,<Message content>
-        // This variant may arrive from peers; just forward or queue using our handler
-        std::string toGroup = tokens[1];
-        std::string fromGroup = tokens[2];
-        std::string text;
-        for (size_t i = 3; i < tokens.size(); ++i) {
-            if (i > 3) text += " ";
-            text += tokens[i];
-        }
-        deliverOrQueueMessage(toGroup, fromGroup, text);
+    //=============================================================================
+    // PEER-TO-PEER MESSAGE ROUTING
+    //=============================================================================
+
     } else if (tokens[0].rfind("SENDMSG,", 0) == 0) {
-        // Robust comma parsing for single-token form: SENDMSG,<TO>,<FROM>,<TEXT>
+        // SENDMSG from peers - format: SENDMSG,<TO>,<FROM>,<TEXT>
         const std::string &s = tokens[0];
         size_t p1 = s.find(',');
         if (p1 == std::string::npos) return;
@@ -445,27 +343,22 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         if (p2 == std::string::npos) return;
         size_t p3 = s.find(',', p2 + 1);
         if (p3 == std::string::npos) return;
+        
         std::string toGroup = s.substr(p1 + 1, p2 - (p1 + 1));
         std::string fromGroup = s.substr(p2 + 1, p3 - (p2 + 1));
         std::string text = s.substr(p3 + 1);
-        deliverOrQueueMessage(toGroup, fromGroup, text);
-    } else if(tokens[0] == "GETMSGS" && tokens.size() >= 2) {
-        // GETMSGS,<GROUP ID> — return one queued message for that group if any
-        std::string target = tokens[1];
-        auto itp = pendingMessagesByGroup.find(target);
-        if (target.empty() || itp == pendingMessagesByGroup.end() || itp->second.empty()) {
-            sendFormattedMessage(clientSocket, std::string("NO_MSG"));
-        } else {
-            std::string entry = itp->second.front();
-            itp->second.pop_front();
-            // entry is FROM,TEXT; reply as SENDMSG,<TO>,<FROM>,<TEXT>
-            std::ostringstream resp;
-            resp << "SENDMSG," << target << "," << entry;
-            sendFormattedMessage(clientSocket, resp.str());
-        }
+        
+        routeMessage(toGroup, fromGroup, text);
+
+    //=============================================================================
+    // PEER-TO-PEER CONTROL COMMANDS
+    //=============================================================================
+
     } else if (tokens[0].rfind("GETMSGS,", 0) == 0) {
-        // Support comma-prefixed single token: GETMSGS,<GROUP>
+        // GETMSGS - return one queued message for the specified group
+        // Format: GETMSGS,<GROUP>
         std::string target = tokens[0].substr(8);
+        
         auto itp = pendingMessagesByGroup.find(target);
         if (target.empty() || itp == pendingMessagesByGroup.end() || itp->second.empty()) {
             sendFormattedMessage(clientSocket, std::string("NO_MSG"));
@@ -475,9 +368,15 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             std::ostringstream resp;
             resp << "SENDMSG," << target << "," << entry;
             sendFormattedMessage(clientSocket, resp.str());
+            LOG("SENT: Queued message for " << target << " (retrieved via GETMSGS)");
         }
+    
+    //=============================================================================
+    // PEER-TO-PEER STATUS & MONITORING
+    //=============================================================================
+    
     } else if (tokens[0].rfind("KEEPALIVE,", 0) == 0) {
-        // Parse incoming KEEPALIVE,<n>; update last-heard timestamp
+        // KEEPALIVE - update last-heard timestamp for this peer
         lastKeepaliveHeardAt[clientSocket] = time(nullptr);
     } else if (tokens[0] == "STATUSREQ") {
         // Build STATUSRESP,<group,count>,... for all known peers and queued groups
@@ -506,7 +405,12 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
         }
 
         sendFormattedMessage(clientSocket, resp.str());
-        std::cout << "Replied STATUSRESP: " << resp.str() << std::endl;
+        LOG("SENT: " << resp.str());
+
+    //=============================================================================
+    // PROTOCOL HANDSHAKE & DISCOVERY
+    //=============================================================================
+
     } else if (tokens[0].find("HELO,") == 0) {
         // Expected: HELO,<FROM_GROUP_ID>[,<PORT>]; reply with SERVERS list per spec
         std::vector<std::string> parts;
@@ -534,8 +438,8 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
             if (existingFd != -1) {
                 int keepFd = std::min(existingFd, clientSocket);
                 int dropFd = (keepFd == existingFd) ? clientSocket : existingFd;
-                std::cout << "Duplicate connection for group " << peerGroup << ", closing fd " << dropFd << std::endl;
-                closeClient(dropFd, pollfds);
+                LOG("Duplicate connection for group " << peerGroup << " detected, closing socket " << dropFd);
+                closeConnection(dropFd, pollfds);
             }
         }
 
@@ -556,17 +460,21 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
 
         std::string serversMsg = resp.str();
         sendFormattedMessage(clientSocket, serversMsg);
-        std::cout << "Replied SERVERS: " << serversMsg << std::endl;
+        LOG("SENT: " << serversMsg);
+    
+    // SERVERS - process peer list and auto-connect to discovered servers
     } else if (tokens[0].find("SERVERS") == 0) {
-        std::cout << "Processing SERVERS response" << std::endl;
+        LOG("RECEIVED: " << tokens[0]);
 
+        // === PARSE SERVER LIST ===
         std::string serverList = tokens[0].substr(8);
-
         std::stringstream entryStream(serverList);
         std::string entry;
+        
         while (std::getline(entryStream, entry, ';')) {
             if (entry.empty()) continue;
 
+            // Parse entry: GROUP,IP,PORT
             std::vector<std::string> parts;
             std::stringstream partStream(entry);
             std::string part;
@@ -574,230 +482,196 @@ void clientCommand(int clientSocket, char *buffer, std::vector<struct pollfd> &p
                 parts.push_back(part);
             }
 
-            if (parts.size() == 3) {
-                std::string group = parts[0];
-                std::string ip = parts[1];
-                int partPort = std::stoi(parts[2]);
+            if (parts.size() != 3) continue;
+            
+            std::string group = parts[0];
+            std::string ip = parts[1];
+            int partPort = std::stoi(parts[2]);
 
-                // Basic validation: skip self, empty group/ip, non-positive port
-                if (group.empty() || ip.empty() || partPort <= 0) {
-                    continue;
-                }
-                if (group == myGroupID) {
-                    continue;
-                }
+            // === VALIDATE ENTRY ===
+            if (group.empty() || ip.empty() || partPort <= 0 || group == myGroupID) {
+                continue;
+            }
 
-                std::cout << "Discovered: " << group << " at " << ip << ":" << partPort << std::endl;
+            LOG("Discovered server: " << group << " at " << ip << ":" << partPort);
 
-                if (partPort > 0) {
-                    // Check if already connected by group or ip:port
-                    bool alreadyConnected = false;
-                    for (const auto &ckv : clients) {
-                        const Client* c = ckv.second;
-                        if (!c) continue;
-                        if (!c->name.empty() && c->name == group) { alreadyConnected = true; break; }
-                        if (c->ip == ip && c->port == partPort) { alreadyConnected = true; break; }
-                    }
-
-                    if (!alreadyConnected) {
-                        // Cooldown guard (60s) per ip:port
-                        std::ostringstream key; key << ip << ":" << partPort;
-                        time_t now = time(nullptr);
-                        auto itLast = lastAutoConnectAttemptAt.find(key.str());
-                        if (itLast != lastAutoConnectAttemptAt.end() && difftime(now, itLast->second) < 60.0) {
-                            continue;
-                        }
-                        lastAutoConnectAttemptAt[key.str()] = now;
-
-                        int outSock = socket(AF_INET, SOCK_STREAM, 0);
-                        if (outSock < 0) {
-                            perror("Failed to create outgoing socket");
-                        } else {
-                            setNonBlocking(outSock);
-                            struct sockaddr_in serverAddr;
-                            memset(&serverAddr, 0, sizeof(serverAddr));
-                            serverAddr.sin_family = AF_INET;
-                            serverAddr.sin_port = htons(partPort);
-                            if (inet_pton(AF_INET, ip.c_str(), &serverAddr.sin_addr) <= 0) {
-                                std::cerr << "Invalid IP address from SERVERS: " << ip << std::endl;
-                                close(outSock);
-                            } else {
-                                if (connect(outSock, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
-                                    if (errno != EINPROGRESS) {
-                                        perror("Connect failed");
-                                        close(outSock);
-                                    }
-                                }
-
-                                struct pollfd npfd; npfd.fd = outSock; npfd.events = POLLIN; pollfds.push_back(npfd);
-                                clients[outSock] = new Client(outSock, ip, partPort);
-                                std::cout << "Auto-connecting to discovered server " << group << " at " << ip << ":" << partPort << std::endl;
-
-                                std::string heloMsg = "HELO," + myGroupID;
-                                sendFormattedMessage(outSock, heloMsg);
-                            }
-                        }
-                    }
+            // === CHECK IF ALREADY CONNECTED ===
+            bool alreadyConnected = false;
+            for (const auto &ckv : clients) {
+                const Client* c = ckv.second;
+                if (!c) continue;
+                if ((!c->name.empty() && c->name == group) || (c->ip == ip && c->port == partPort)) {
+                    alreadyConnected = true;
+                    break;
                 }
             }
+            if (alreadyConnected) continue;
+
+            // === COOLDOWN GUARD (60s per ip:port) ===
+            std::ostringstream key;
+            key << ip << ":" << partPort;
+            time_t now = time(nullptr);
+            auto itLast = lastAutoConnectAttemptAt.find(key.str());
+            if (itLast != lastAutoConnectAttemptAt.end() && difftime(now, itLast->second) < 60.0) {
+                continue;
+            }
+            lastAutoConnectAttemptAt[key.str()] = now;
+
+            // === ATTEMPT CONNECTION ===
+            int outSock = socket(AF_INET, SOCK_STREAM, 0);
+            if (outSock < 0) {
+                perror("Failed to create outgoing socket");
+                continue;
+            }
+            
+            setNonBlocking(outSock);
+            struct sockaddr_in serverAddr;
+            memset(&serverAddr, 0, sizeof(serverAddr));
+            serverAddr.sin_family = AF_INET;
+            serverAddr.sin_port = htons(partPort);
+            
+            if (inet_pton(AF_INET, ip.c_str(), &serverAddr.sin_addr) <= 0) {
+                LOG_ERROR("Invalid IP address from SERVERS: " << ip);
+                close(outSock);
+                continue;
+            }
+            
+            if (connect(outSock, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
+                if (errno != EINPROGRESS) {
+                    perror("Connect failed");
+                    close(outSock);
+                    continue;
+                }
+            }
+
+            // === REGISTER CONNECTION & SEND HELO ===
+            struct pollfd npfd;
+            npfd.fd = outSock;
+            npfd.events = POLLIN;
+            pollfds.push_back(npfd);
+            clients[outSock] = new Client(outSock, ip, partPort);
+            
+            LOG("Auto-connecting to discovered server " << group << " at " << ip << ":" << partPort);
+            
+            std::string heloMsg = "HELO," + myGroupID;
+            sendFormattedMessage(outSock, heloMsg);
+            LOG("SENT: HELO," << myGroupID << " to " << group);
         }
         return;
+
+    //=============================================================================
+    // UNKNOWN COMMAND
+    //=============================================================================
+
     } else {
-        std::cout << "Unknown command from client: " << buffer << std::endl;
+        LOG("RECEIVED: Unknown command: " << buffer);
     }
 }
 
 
 int main(int argc, char* argv[]) {
-    if(argc != 2) {
-        std::cerr << "Usage: server <port>" << std::endl;
-        return 1;
-    }
+    //=============================================================================
+    // INITIALIZATION
+    //=============================================================================
+    if(argc != 2) { std::cerr << "Usage: server <port>" << std::endl; return 1; }
 
     int port = atoi(argv[1]);
     int listenSock = open_socket(port);
     if(listenSock < 0) return 1;
+    if(listen(listenSock, BACKLOG) < 0) { perror("Listen failed"); return 1; }
 
-    if(listen(listenSock, BACKLOG) < 0) {
-        perror("Listen failed");
-        return 1;
-    }
-
-    std::cout << "Listening on port: " << port << std::endl;
+    LOG("Server " << myGroupID << " listening on port " << port);
 
     std::vector<struct pollfd> pollfds;
-    struct pollfd listenPoll;
-    listenPoll.fd = listenSock;
-    listenPoll.events = POLLIN;
+    struct pollfd listenPoll = {listenSock, POLLIN, 0};
     pollfds.push_back(listenPoll);
 
-    bool running = true;
     char buffer[1025];
 
-    while(running) {
-        // Wake up once per second to drive periodic KEEPALIVE sends
-        int pollCount = poll(pollfds.data(), pollfds.size(), 1000);
-        if(pollCount < 0) {
-            perror("poll failed");
-            break;
-        }
+    //=============================================================================
+    // MAIN EVENT LOOP
+    //=============================================================================
+    while(true) {
+        // Poll with 1s timeout for periodic KEEPALIVE
+        if(poll(pollfds.data(), pollfds.size(), 1000) < 0) { perror("poll failed"); break; }
 
+        // === PROCESS SOCKET EVENTS ===
         for(size_t i = 0; i < pollfds.size(); i++) {
-            if(pollfds[i].revents & POLLIN) { 
-                if(pollfds[i].fd == listenSock) {
-                    // New connection
-                    struct sockaddr_in client;
-                    socklen_t clientLen = sizeof(client);
-                    int clientSock = accept(listenSock, (struct sockaddr *)&client, &clientLen);
+            if(!(pollfds[i].revents & POLLIN)) continue;
+            
+            // --- ACCEPT NEW CONNECTIONS ---
+            if(pollfds[i].fd == listenSock) {
+                struct sockaddr_in client;
+                socklen_t clientLen = sizeof(client);
+                int clientSock = accept(listenSock, (struct sockaddr *)&client, &clientLen);
                 if(clientSock >= 0) {
-                        setNonBlocking(clientSock);
+                    setNonBlocking(clientSock);
+                    struct pollfd pfd = {clientSock, POLLIN, 0};
+                    pollfds.push_back(pfd);
 
-                        struct pollfd pfd;
-                        pfd.fd = clientSock;
-                        pfd.events = POLLIN;
-                        pollfds.push_back(pfd);
+                    char ipStr[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &(client.sin_addr), ipStr, INET_ADDRSTRLEN);
+                    int clientPort = ntohs(client.sin_port);
+                    
+                    clients[clientSock] = new Client(clientSock, std::string(ipStr), clientPort);
+                    LOG("ACCEPT: Incoming connection from " << ipStr << ":" << clientPort << " (socket " << clientSock << ")");
 
-                        int clientPort = ntohs(client.sin_port);
-                        char ipStr[INET_ADDRSTRLEN];
-                        inet_ntop(AF_INET, &(client.sin_addr), ipStr, INET_ADDRSTRLEN);
-                        
-                        clients[clientSock] = new Client(clientSock, std::string(ipStr), clientPort);
-
-                        std::cout << "Client connected: " << clientSock 
-                                << " (port " << clientPort << ")" << std::endl;
-
-                        std::string heloMsg = "HELO," + myGroupID;
-                        sendFormattedMessage(clientSock, heloMsg);
-                        std::cout << "Sent HELO to " << ipStr << ":" << clientPort << std::endl;
-                    }
+                    sendFormattedMessage(clientSock, "HELO," + myGroupID);
+                    LOG("SENT: HELO," << myGroupID << " to " << ipStr << ":" << clientPort);
+                }
+            
+            // --- RECEIVE DATA FROM EXISTING CONNECTIONS ---
+            } else {
+                memset(buffer, 0, sizeof(buffer));
+                int r = recv(pollfds[i].fd, buffer, sizeof(buffer), 0);
+                
+                if(r <= 0) {
+                    closeConnection(pollfds[i].fd, pollfds);
+                    i--; 
                 } else {
-                    memset(buffer, 0, sizeof(buffer));
-                    int r = recv(pollfds[i].fd, buffer, sizeof(buffer), 0);
-                    if(r <= 0) {
-                        closeClient(pollfds[i].fd, pollfds);
-                        i--; 
-                    } else {
-                        // Append to per-socket buffer and extract as many frames as available
-                        std::string &acc = recvBuffers[pollfds[i].fd];
-                        acc.append(buffer, r);
+                    std::string &acc = recvBuffers[pollfds[i].fd];
+                    acc.append(buffer, r);
 
-                        // Process frames in a loop
-                        while (true) {
-                            if (acc.size() < 5) break; // need at least header
+                    // --- PARSE PROTOCOL FRAMES: <SOH><len><STX><payload><ETX> ---
+                    while (true) {
+                        if (acc.size() < 5) break;
 
-                            // Resync to SOH if necessary
-                            if ((unsigned char)acc[0] != 0x01) {
-                                size_t pos = acc.find((char)0x01);
-                                if (pos == std::string::npos) {
-                                    acc.clear();
-                                    break;
-                                } else {
-                                    acc.erase(0, pos);
-                                    if (acc.size() < 5) break;
-                                }
-                            }
-
-                            uint16_t total_length = 0;
-                            memcpy(&total_length, &acc[1], 2);
-                            total_length = ntohs(total_length);
-
-                            if (acc.size() < total_length) {
-                                // wait for more data
-                                break;
-                            }
-
-                            // Validate STX and ETX
-                            if ((unsigned char)acc[3] != 0x02 || (unsigned char)acc[total_length - 1] != 0x03) {
-                                // Drop SOH and try to resync
-                                acc.erase(0, 1);
-                                continue;
-                            }
-
-                            // Extract payload
-                            int payload_length = total_length - 5;
-                            std::string payload;
-                            if (payload_length > 0) {
-                                payload.assign(&acc[4], payload_length);
-                            }
-
-                            // Consume this frame
-                            acc.erase(0, total_length);
-
-                            // Dispatch payload as command
-                            std::cout << "Received command: " << payload << std::endl;
-                            char cmd_buffer[1025];
-                            strncpy(cmd_buffer, payload.c_str(), sizeof(cmd_buffer) - 1);
-                            cmd_buffer[sizeof(cmd_buffer) - 1] = '\0';
-                            clientCommand(pollfds[i].fd, cmd_buffer, pollfds, port);
+                        // Resync to SOH (0x01)
+                        if ((unsigned char)acc[0] != 0x01) {
+                            size_t pos = acc.find((char)0x01);
+                            if (pos == std::string::npos) { acc.clear(); break; }
+                            acc.erase(0, pos);
+                            if (acc.size() < 5) break;
                         }
+
+                        uint16_t total_length;
+                        memcpy(&total_length, &acc[1], 2);
+                        total_length = ntohs(total_length);
+
+                        if (acc.size() < total_length) break;
+
+                        // Validate STX (0x02) and ETX (0x03)
+                        if ((unsigned char)acc[3] != 0x02 || (unsigned char)acc[total_length - 1] != 0x03) {
+                            acc.erase(0, 1);
+                            continue;
+                        }
+
+                        // Extract and dispatch payload
+                        std::string payload = (total_length > 5) ? acc.substr(4, total_length - 5) : "";
+                        acc.erase(0, total_length);
+
+                        LOG("RECEIVED: " << payload);
+                        char cmd_buffer[1025];
+                        strncpy(cmd_buffer, payload.c_str(), sizeof(cmd_buffer) - 1);
+                        cmd_buffer[sizeof(cmd_buffer) - 1] = '\0';
+                        clientCommand(pollfds[i].fd, cmd_buffer, pollfds, port);
                     }
                 }
             }
         }
 
-        // Attempt periodic KEEPALIVE to identified peers (rate-limited)
-        for (const auto &kv : clients) {
-            maybeSendKeepalive(kv.first);
-        }
-
-        // Boost leaderboard metrics by sending commands to peers
-        boostLeaderboardMetrics();
-
-        // Log stale peers with no incoming keepalive for > 3 minutes (non-fatal)
-        time_t now = time(nullptr);
-        for (const auto &kv : clients) {
-            int fd = kv.first;
-            if (fd == client_sock) continue; // skip admin
-            auto itHeard = lastKeepaliveHeardAt.find(fd);
-            if (itHeard == lastKeepaliveHeardAt.end()) continue;
-            double secs = difftime(now, itHeard->second);
-            if (secs > 180.0) {
-                const Client* c = kv.second;
-                std::cerr << "Warning: no KEEPALIVE heard from "
-                          << (c && !c->name.empty() ? c->name : std::to_string(fd))
-                          << " for " << (int)secs << "s" << std::endl;
-            }
-        }
+        // === PERIODIC MAINTENANCE ===
+        for (const auto &kv : clients) sendKeepaliveIfDue(kv.first);
     }
 
     close(listenSock);

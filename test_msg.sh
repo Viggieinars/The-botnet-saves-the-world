@@ -23,7 +23,7 @@ echo "Terminal 3 should receive: Hello from Group14!"
 echo ""
 echo "=== Commands to Test ==="
 echo "1. MSG <recipient> <message>  - Send message to another client by name"
-echo "2. SENDMSG <groupID> <message> - (requires Group14isthebest auth first)"
-echo "3. CONNECT <ip> <port> - (requires Group14isthebest auth first)"
+echo "2. SENDMSG <groupID> <message> - (requires CLIENTAUTH first)"
+echo "3. CONNECT <ip> <port> - (requires CLIENTAUTH first)"
 
 
